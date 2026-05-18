@@ -1,0 +1,333 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --canvas: #0A0C10;
+  --card: #1E1E2F;
+  --glass: rgba(30, 30, 47, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --text-primary: #E0E0E0;
+  --text-secondary: #8E8E9A;
+  --accent: #5C6EF8;
+  --success: #10B981;
+  --warning: #F59E0B;
+  --error: #F43F5E;
+  --radius-lg: 24px;
+  --radius-pill: 40px;
+}
+
+html, body, .stApp {
+  background-color: var(--canvas) !important;
+  color: var(--text-primary) !important;
+  font-family: 'Inter', system-ui, sans-serif !important;
+  font-size: 14px !important;
+}
+
+[data-testid="stAppViewContainer"] {
+  background: var(--canvas) !important;
+}
+
+/* Sidebar glass */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, rgba(30,30,47,0.95) 0%, rgba(10,12,16,0.98) 100%) !important;
+  border-right: 1px solid var(--glass-border) !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+  background: transparent !important;
+}
+[data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label, [data-testid="stSidebar"] small {
+  color: var(--text-primary) !important;
+}
+[data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] [data-testid="stMetricLabel"] {
+  color: var(--text-secondary) !important;
+}
+
+/* Main blocks */
+[data-testid="stHeader"] {
+  background: transparent !important;
+}
+
+.ds-hero {
+  background: linear-gradient(135deg, rgba(92,110,248,0.25) 0%, rgba(30,30,47,0.9) 50%, rgba(10,12,16,0.95) 100%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 1.75rem 2rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 20px 50px -20px rgba(0,0,0,0.5);
+}
+.ds-hero h1 {
+  font-size: 36px;
+  font-weight: 600;
+  margin: 0 0 0.35rem 0;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.ds-hero p {
+  font-size: 16px;
+  margin: 0;
+  color: var(--text-secondary);
+  max-width: 52rem;
+  line-height: 1.5;
+}
+
+.glass-card {
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1rem;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.glass-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 30px -10px rgba(0,0,0,0.3);
+}
+
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-secondary);
+  margin: 0 0 0.65rem 0.1rem;
+}
+
+/* Buttons */
+.stButton > button {
+  border-radius: var(--radius-pill) !important;
+  padding: 0.5rem 1.5rem !important;
+  font-weight: 600 !important;
+  font-size: 14px !important;
+  border: none !important;
+  background: linear-gradient(135deg, #5C6EF8 0%, #3d4fd9 100%) !important;
+  color: #fff !important;
+  transition: transform 0.18s ease, box-shadow 0.18s ease !important;
+  box-shadow: 0 4px 18px rgba(92, 110, 248, 0.35) !important;
+}
+.stButton > button:hover {
+  transform: scale(1.02) !important;
+  box-shadow: 0 8px 28px rgba(92, 110, 248, 0.45) !important;
+}
+.stButton > button:active {
+  transform: scale(0.98) !important;
+}
+
+/* Secondary outline buttons in columns */
+.ds-btn-secondary .stButton > button {
+  background: rgba(92,110,248,0.15) !important;
+  color: var(--accent) !important;
+  border: 1px solid rgba(92,110,248,0.4) !important;
+  box-shadow: none !important;
+}
+
+/* Metrics glow */
+.ds-metric-glow [data-testid="stMetricValue"] {
+  color: var(--text-primary) !important;
+  text-shadow: 0 0 18px rgba(92, 110, 248, 0.55);
+  font-size: 20px !important;
+  font-weight: 600 !important;
+}
+.ds-metric-glow [data-testid="stMetricLabel"] {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+}
+
+/* Score hero */
+.score-hero-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1rem 0 1.25rem;
+}
+.score-svg-wrap {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  filter: drop-shadow(0 0 12px rgba(92, 110, 248, 0.35));
+}
+.score-svg-wrap svg {
+  width: 180px;
+  height: 180px;
+}
+.score-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  text-align: center;
+}
+.score-num {
+  font-size: 4rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, #8b9cff 0%, #5C6EF8 40%, #10B981 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 0 32px rgba(92, 110, 248, 0.55);
+}
+.score-pct {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  -webkit-text-fill-color: var(--text-secondary);
+}
+.score-sub {
+  margin-top: 0.75rem;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.score-kw {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
+  font-family: 'Geist Mono', ui-monospace, monospace;
+}
+.score-insight {
+  margin-top: 0.75rem;
+  font-size: 14px;
+  color: var(--text-secondary);
+  text-align: center;
+  max-width: 40rem;
+  line-height: 1.5;
+}
+
+.kw-card {
+  background: rgba(30, 30, 47, 0.55);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 1rem 1.1rem;
+  margin-top: 0.75rem;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.kw-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -12px rgba(0,0,0,0.35);
+}
+.kw-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.02em;
+}
+
+/* Chips */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+.chip {
+  display: inline-block;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  transition: transform 0.15s ease;
+}
+.chip:hover {
+  transform: scale(1.04);
+}
+.chip-matched {
+  background: #10B981;
+  color: #0A0C10;
+  font-weight: 600;
+}
+.chip-missing {
+  background: #F43F5E;
+  color: #ffffff;
+  font-weight: 500;
+}
+.chip-more {
+  background: rgba(255,255,255,0.08);
+  color: var(--text-secondary);
+}
+
+/* Technical / preview */
+.mono-block, textarea, [data-testid="stTextArea"] textarea {
+  font-family: 'Geist Mono', ui-monospace, monospace !important;
+  font-size: 12px !important;
+}
+
+/* Skeleton */
+.skeleton-block {
+  height: 140px;
+  border-radius: 16px;
+  background: linear-gradient(90deg, #1E1E2F 0%, #2a2a3f 45%, #1E1E2F 90%);
+  background-size: 200% 100%;
+  animation: ds-shimmer 1.25s ease-in-out infinite;
+  border: 1px solid var(--glass-border);
+}
+@keyframes ds-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Streamlit widgets on dark */
+.stTextInput input, .stTextArea textarea, [data-baseweb="textarea"] {
+  background: rgba(10,12,16,0.6) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--glass-border) !important;
+}
+.stExpander {
+  background: rgba(30,30,47,0.5) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 16px !important;
+}
+
+/* Glass bordered Streamlit containers (bento cards) */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--glass) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: var(--radius-lg) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 30px -10px rgba(0,0,0,0.3);
+}
+
+/* Metric glow (main canvas) */
+.block-container [data-testid="stMetric"] {
+  background: rgba(92,110,248,0.08) !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(92,110,248,0.22) !important;
+  padding: 0.35rem 0.5rem !important;
+}
+.block-container [data-testid="stMetricValue"] {
+  color: var(--text-primary) !important;
+  text-shadow: 0 0 18px rgba(92, 110, 248, 0.55) !important;
+  font-size: 2.35rem !important;
+  font-weight: 700 !important;
+}
+.block-container [data-testid="stMetricLabel"] {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+}
+
+/* Info / status */
+.stAlert {
+  background: rgba(92,110,248,0.12) !important;
+  border: 1px solid rgba(92,110,248,0.25) !important;
+  color: var(--text-primary) !important;
+}
+
+@media (max-width: 900px) {
+  [data-testid="stHorizontalBlock"] {
+    flex-direction: column !important;
+  }
+  [data-testid="column"] {
+    width: 100% !important;
+    min-width: 100% !important;
+  }
+}
