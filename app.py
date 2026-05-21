@@ -14,6 +14,12 @@ _env_file = Path(__file__).resolve().parent / ".env"
 if _env_file.is_file():
     load_dotenv(_env_file, override=True)
 
+import applylytics.config as _config
+
+# Streamlit Cloud: sync secrets into env before other modules read settings.
+_config.sync_streamlit_secrets_to_environ()
+_config.settings = _config.load_settings()
+
 from applylytics.config import settings
 from applylytics.constants import ASSETS_DIR, CV_TEMPLATE_DOCX, SessionKey
 from applylytics.ui.components import render_hero_section, render_top_bar, scroll_to_snap

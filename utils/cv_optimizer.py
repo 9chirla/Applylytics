@@ -35,13 +35,11 @@ def get_groq_model() -> str:
 
 
 def _resolve_groq_api_key() -> str:
-    """Prefer applylytics Settings (.env) over raw os.environ."""
+    """Prefer applylytics Settings / Streamlit secrets over raw os.environ."""
     try:
-        from applylytics.config import settings
+        from applylytics.config import resolve_groq_api_key
 
-        key = (settings.groq_api_key or "").strip()
-        if key:
-            return key
+        return resolve_groq_api_key()
     except ImportError:
         pass
     return (os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
@@ -60,9 +58,9 @@ def get_groq_client() -> OpenAI:
         return _GROQ_CLIENT
     api_key = _resolve_groq_api_key()
     if not api_key:
-        raise RuntimeError(
-            "Set GROQ_API_KEY or OPENAI_API_KEY in your .env file to enable AI analysis (Groq)."
-        )
+        from applylytics.config import api_key_help_message
+
+        raise RuntimeError(f"GROQ_API_KEY is not set. {api_key_help_message()}")
     _GROQ_CLIENT = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
     return _GROQ_CLIENT
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Streamlit Cloud secrets.toml keys → Settings fields
+# Streamlit Cloud secrets.toml / dashboard keys → Settings fields
 _SECRETS_FIELD_MAP: dict[str, str] = {
     "GROQ_API_KEY": "groq_api_key",
     "GEMINI_API_KEY": "gemini_api_key",
@@ -17,17 +18,52 @@ _SECRETS_FIELD_MAP: dict[str, str] = {
     "DEBUG_MODE": "debug_mode",
 }
 
+_API_KEY_HELP = (
+    "Set GROQ_API_KEY in a local `.env` file, or in Streamlit Cloud under "
+    "App settings → Secrets (TOML: GROQ_API_KEY = \"your-key\"). "
+    "Do not reuse OPENAI_API_KEY — they go to different servers."
+)
+
+
+def sync_streamlit_secrets_to_environ() -> None:
+    """Expose Streamlit secrets as env vars so pydantic-settings can read them."""
+    try:
+        import streamlit as st
+
+        for secret_key in _SECRETS_FIELD_MAP:
+            try:
+                value = st.secrets[secret_key]
+            except (KeyError, TypeError):
+                continue
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                os.environ[secret_key] = text
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
 
 def _streamlit_secrets_overrides() -> dict[str, Any]:
-    """Read Streamlit Cloud secrets when env vars / .env are absent."""
+    """Direct kwargs for Settings from st.secrets (call-time, not import-time)."""
     overrides: dict[str, Any] = {}
     try:
         import streamlit as st
 
-        secrets = st.secrets
         for secret_key, field_name in _SECRETS_FIELD_MAP.items():
-            if secret_key in secrets:
-                overrides[field_name] = secrets[secret_key]
+            try:
+                value = st.secrets[secret_key]
+            except (KeyError, TypeError):
+                continue
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                overrides[field_name] = value
+    except FileNotFoundError:
+        pass
     except Exception:
         pass
     return overrides
@@ -51,4 +87,24 @@ class Settings(BaseSettings):
     debug_mode: bool = False
 
 
-settings = Settings(**_streamlit_secrets_overrides())
+def load_settings() -> Settings:
+    """Build settings after syncing Streamlit secrets into the environment."""
+    sync_streamlit_secrets_to_environ()
+    return Settings(**_streamlit_secrets_overrides())
+
+
+def resolve_groq_api_key() -> str:
+    """Return Groq API key from secrets, env, or .env (refreshed each call)."""
+    sync_streamlit_secrets_to_environ()
+    current = load_settings()
+    key = (current.groq_api_key or "").strip()
+    if key:
+        return key
+    return (os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+def api_key_help_message() -> str:
+    return _API_KEY_HELP
+
+
+settings = load_settings()

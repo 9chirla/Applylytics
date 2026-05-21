@@ -8,7 +8,7 @@ from typing import Any
 
 from openai import APIError, OpenAI, RateLimitError as OpenAIRateLimitError
 
-from applylytics.config import settings
+from applylytics.config import api_key_help_message, resolve_groq_api_key, settings
 
 logger = logging.getLogger("applylytics")
 
@@ -65,12 +65,9 @@ def is_groq_rate_limit_error(obj: Any) -> bool:
 
 def groq_api_key() -> str:
     """Return configured Groq API key or raise EnvironmentError."""
-    key = (settings.groq_api_key or "").strip()
+    key = resolve_groq_api_key()
     if not key:
-        raise EnvironmentError(
-            "GROQ_API_KEY is not set. Add it to your .env file. "
-            "Do not reuse OPENAI_API_KEY — they go to different servers."
-        )
+        raise EnvironmentError(f"GROQ_API_KEY is not set. {api_key_help_message()}")
     return key
 
 
