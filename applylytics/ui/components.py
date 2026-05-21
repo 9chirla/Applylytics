@@ -213,7 +213,7 @@ def render_score_ring(score: int) -> str:
           transform="rotate(-90 60 60)"/>
       </svg>
       <div class="al-ring-center">
-        <span class="al-ring-num">{score}</span><span class="al-ring-pct">%</span>
+        <span class="al-ring-value">{score}<span class="al-ring-pct">%</span></span>
       </div>
     </div>
     """)
