@@ -285,8 +285,15 @@ def safe_groq_chat_create(
     except LLMRateLimitError:
         raise
     except APIError as exc:
+        status = getattr(exc, "status_code", None)
         if _http_status_429(exc):
             return _rate_limit_fallback(exc)
+        if status == 413 or str(status) == "413":
+            return None, (
+                "Groq API error (413): Request payload too large. "
+                "Resume or job description was trimmed automatically on retry; "
+                "if this persists, use a shorter PDF or job posting."
+            )
         return None, f"Groq API error ({getattr(exc, 'status_code', '?')}): {exc}"
 
 
@@ -475,6 +482,10 @@ def build_user_message(
     missing_keywords: list[str] | None = None,
 ) -> str:
     """User message with raw CV plus optional job / keyword context (not part of system prompt)."""
+    from applylytics.constants import MAX_CV_OPTIMIZER_CHARS
+    from applylytics.llm.context import smart_truncate
+
+    raw_text = smart_truncate((raw_text or "").strip(), MAX_CV_OPTIMIZER_CHARS)
     hints = extract_cv_data(raw_text)
     parts = [
         "Below is the candidate's raw CV text. Apply all rewriting rules from your system prompt.",
@@ -571,6 +582,19 @@ def _flatten_profile_and_bullets(parsed: dict[str, Any]) -> str:
     return " ".join([ps, *bullets])
 
 
+def _shrink_messages_for_groq(messages: list[dict[str, str]], max_chars: int = 12_000) -> list[dict[str, str]]:
+    """Halve oversized message bodies to recover from Groq 413 payload errors."""
+    from applylytics.llm.context import smart_truncate
+
+    shrunk: list[dict[str, str]] = []
+    for msg in messages:
+        content = str(msg.get("content") or "")
+        if len(content) > max_chars:
+            content = smart_truncate(content, max_chars)
+        shrunk.append({**msg, "content": content})
+    return shrunk
+
+
 def _fetch_chat_completion(
     client: OpenAI,
     *,
@@ -593,36 +617,51 @@ def _fetch_chat_completion(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": 8192,
+        "max_tokens": 4096,
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
-    try:
-        response, err = safe_groq_chat_create(
-            client,
-            fallback_client=fallback_client,
-            fallback_model=fallback_model,
-            **kwargs,
-        )
-        if err is None:
-            return response, None
-        if json_mode:
-            plain_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+    def _call(attempt_kwargs: dict[str, Any]) -> tuple[Any, str | None]:
+        try:
             return safe_groq_chat_create(
                 client,
                 fallback_client=fallback_client,
                 fallback_model=fallback_model,
-                **plain_kwargs,
+                **attempt_kwargs,
             )
+        except (OpenAIRateLimitError, LLMRateLimitError):
+            raise
+        except APIError as exc:
+            if _http_status_429(exc):
+                from applylytics.llm.client import groq_quota_user_message
+
+                raise LLMRateLimitError(groq_quota_user_message(exc)) from exc
+            raise
+
+    try:
+        response, err = _call(kwargs)
+        if err is None:
+            return response, None
+        if "413" in err and kwargs["messages"]:
+            logger.warning("Groq 413 payload too large — retrying with truncated messages")
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["messages"] = _shrink_messages_for_groq(kwargs["messages"])
+            retry_kwargs["max_tokens"] = min(int(kwargs.get("max_tokens", 4096)), 3072)
+            response, err = _call(retry_kwargs)
+            if err is None:
+                return response, None
+        if json_mode:
+            plain_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
+            response, err = _call(plain_kwargs)
+            if err is None:
+                return response, None
+            if "413" in (err or "") and plain_kwargs.get("messages"):
+                plain_kwargs["messages"] = _shrink_messages_for_groq(plain_kwargs["messages"])
+                plain_kwargs["max_tokens"] = min(int(plain_kwargs.get("max_tokens", 4096)), 3072)
+                return _call(plain_kwargs)
         return None, err
     except (OpenAIRateLimitError, LLMRateLimitError):
-        raise
-    except APIError as exc:
-        if _http_status_429(exc):
-            from applylytics.llm.client import groq_quota_user_message
-
-            raise LLMRateLimitError(groq_quota_user_message(exc)) from exc
         raise
 
 

@@ -102,6 +102,12 @@ def safe_groq_chat_create(client: OpenAI, **kwargs: Any) -> tuple[Any, str | Non
         status = getattr(exc, "status_code", None)
         if status == 429 or str(status) == "429":
             raise RateLimitError(groq_quota_user_message(exc)) from exc
+        if status == 413 or str(status) == "413":
+            return None, (
+                "Groq API error (413): Request payload too large. "
+                "Resume or job description was trimmed automatically on retry; "
+                "if this persists, use a shorter PDF or job posting."
+            )
         return None, f"Groq API error ({getattr(exc, 'status_code', '?')}): {exc}"
 
 

@@ -23,7 +23,7 @@ def prepare_resume_job_texts(
     """
     Truncate resume and job text for LLM prompts.
 
-    Single-field limit: 100k chars. Combined limit: 120k (job trimmed first, then resume).
+    Per-field and combined limits are defined in applylytics.constants (Groq-safe sizes).
     """
     resume = resume_text or ""
     job = job_text or ""

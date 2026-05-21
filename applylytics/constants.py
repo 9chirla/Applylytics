@@ -18,8 +18,10 @@ TRUNCATION_WARNING = (
     "Check your PDF export settings if content looks incomplete."
 )
 
-MAX_TEXT_CHARS = 100_000
-MAX_COMBINED_CHARS = 120_000
+# Groq chat completions reject very large HTTP bodies (413). Keep inputs conservative.
+MAX_TEXT_CHARS = 24_000
+MAX_COMBINED_CHARS = 32_000
+MAX_CV_OPTIMIZER_CHARS = 18_000
 
 
 class SessionKey:
