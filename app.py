@@ -6,12 +6,13 @@ import logging
 import secrets
 from pathlib import Path
 
+import streamlit as st
 from dotenv import load_dotenv
 
-# .env must win over stale shell GROQ_API_KEY (avoids 401 after key rotation).
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
-
-import streamlit as st
+# Local only: .env is gitignored and absent on Streamlit Cloud (use Secrets there).
+_env_file = Path(__file__).resolve().parent / ".env"
+if _env_file.is_file():
+    load_dotenv(_env_file, override=True)
 
 from applylytics.config import settings
 from applylytics.constants import ASSETS_DIR, CV_TEMPLATE_DOCX, SessionKey

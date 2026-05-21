@@ -1,6 +1,36 @@
-"""Application settings loaded from environment / .env."""
+"""Application settings loaded from environment, .env, or Streamlit secrets."""
+
+from __future__ import annotations
+
+from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Streamlit Cloud secrets.toml keys → Settings fields
+_SECRETS_FIELD_MAP: dict[str, str] = {
+    "GROQ_API_KEY": "groq_api_key",
+    "GEMINI_API_KEY": "gemini_api_key",
+    "GEMINI_MODEL": "gemini_model",
+    "GROQ_MODEL": "groq_model",
+    "APP_PASSWORD": "app_password",
+    "PORTFOLIO_URL": "portfolio_url",
+    "DEBUG_MODE": "debug_mode",
+}
+
+
+def _streamlit_secrets_overrides() -> dict[str, Any]:
+    """Read Streamlit Cloud secrets when env vars / .env are absent."""
+    overrides: dict[str, Any] = {}
+    try:
+        import streamlit as st
+
+        secrets = st.secrets
+        for secret_key, field_name in _SECRETS_FIELD_MAP.items():
+            if secret_key in secrets:
+                overrides[field_name] = secrets[secret_key]
+    except Exception:
+        pass
+    return overrides
 
 
 class Settings(BaseSettings):
@@ -21,4 +51,4 @@ class Settings(BaseSettings):
     debug_mode: bool = False
 
 
-settings = Settings()
+settings = Settings(**_streamlit_secrets_overrides())
