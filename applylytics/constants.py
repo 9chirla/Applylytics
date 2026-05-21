@@ -28,7 +28,9 @@ class SessionKey:
     """Streamlit session_state keys."""
 
     OPTIMIZED_DATA = "optimized_data"
+    OPTIMISED_ATS_RESULT = "optimised_ats_result"
     MANAGER_COMMENT = "manager_comment"
+    OPTIMISED_MANAGER_COMMENT = "optimised_manager_comment"
     HM_FEEDBACK_CACHE_KEY = "_hm_feedback_cache_key"
     PHASE3_KEY = "_phase3_key"
     AUTHED = "_authed"

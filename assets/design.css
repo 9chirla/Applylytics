@@ -868,6 +868,58 @@ button[data-testid="stBaseButton-primary"]:not([data-key="btn_optimise_cv"]):not
   box-shadow: none !important;
 }
 
+/* Optimised CV results header */
+.al-opt-results-head {
+  margin: 2rem 0 1.25rem;
+}
+.al-opt-compare {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin-top: 0.5rem;
+}
+.al-opt-compare-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.al-opt-compare-k {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.al-opt-compare-v {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.al-opt-compare-item-new .al-opt-compare-v {
+  color: var(--accent);
+}
+.al-opt-compare-arrow {
+  font-size: 1.25rem;
+  color: var(--text-tertiary);
+}
+.al-opt-delta {
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-tertiary);
+}
+.al-opt-delta-up {
+  background: #ecfdf5;
+  color: #047857;
+}
+.al-opt-delta-down {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
 /* Hiring manager card */
 .al-mini-coach {
   background: var(--surface-muted);

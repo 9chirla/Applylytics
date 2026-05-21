@@ -287,16 +287,44 @@ def render_insight(insight_text: str) -> None:
     )
 
 
-def render_hiring_manager_comment(comment: str | None) -> None:
+def render_hiring_manager_comment(comment: str | None, *, label: str = "Hiring manager view") -> None:
     """Hiring manager simulation card."""
     if not comment or not str(comment).strip():
         return
     body = html.escape(str(comment).strip())
     emit_html(f"""
     <div class="al-mini-coach">
-      <div class="al-mini-coach-label">Hiring manager view</div>
+      <div class="al-mini-coach-label">{html.escape(label)}</div>
       <div class="al-mini-coach-text">"{body}"</div>
       <div class="al-mini-coach-name">— AI Hiring Manager Simulation</div>
+    </div>
+    """)
+
+
+def render_optimised_results_header(original_score: int, optimised_score: int) -> None:
+    """Section title plus before/after score comparison."""
+    delta = optimised_score - original_score
+    if delta > 0:
+        delta_html = f'<span class="al-opt-delta al-opt-delta-up">+{delta} pts</span>'
+    elif delta < 0:
+        delta_html = f'<span class="al-opt-delta al-opt-delta-down">{delta} pts</span>'
+    else:
+        delta_html = '<span class="al-opt-delta">no change</span>'
+    emit_html(f"""
+    <div class="al-opt-results-head">
+      <p class="al-results-label">Optimised CV</p>
+      <div class="al-opt-compare">
+        <div class="al-opt-compare-item">
+          <span class="al-opt-compare-k">Original</span>
+          <span class="al-opt-compare-v">{original_score}%</span>
+        </div>
+        <div class="al-opt-compare-arrow">→</div>
+        <div class="al-opt-compare-item al-opt-compare-item-new">
+          <span class="al-opt-compare-k">Optimised</span>
+          <span class="al-opt-compare-v">{optimised_score}%</span>
+        </div>
+        {delta_html}
+      </div>
     </div>
     """)
 

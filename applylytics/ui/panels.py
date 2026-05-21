@@ -33,6 +33,7 @@ from applylytics.ui.components import (
     render_insight,
     render_action_buttons_marker,
     render_keyword_section,
+    render_optimised_results_header,
     render_results_label,
     render_score_panel,
     render_section_header,
@@ -113,7 +114,9 @@ def _sync_input_signature(has_resume: bool, job_description: str) -> None:
         SessionKey.ATS_RESULT,
         SessionKey.RESUME_TEXT,
         SessionKey.OPTIMIZED_DATA,
+        SessionKey.OPTIMISED_ATS_RESULT,
         SessionKey.MANAGER_COMMENT,
+        SessionKey.OPTIMISED_MANAGER_COMMENT,
         SessionKey.HM_FEEDBACK_CACHE_KEY,
     ):
         st.session_state.pop(key, None)
@@ -216,6 +219,9 @@ def _run_ats_scoring(resume_text: str, job_description: str) -> dict:
             SessionKey.MANAGER_COMMENT,
             SessionKey.HM_FEEDBACK_CACHE_KEY,
             SessionKey.OPTIMIZED_DATA,
+            SessionKey.OPTIMISED_ATS_RESULT,
+            SessionKey.OPTIMISED_MANAGER_COMMENT,
+            "_optimised_hm_cache_key",
         ):
             st.session_state.pop(key, None)
     return calculate_ats_score_cached(resume_text, job_description)
@@ -275,43 +281,144 @@ def _sanitize_coach_display(text: str) -> str:
     return "\n".join(lines)
 
 
+def _fetch_original_hiring_manager_comment(
+    resume_text: str,
+    job_description: str,
+    ats_result: dict,
+) -> str | None:
+    """Hiring manager feedback on the original (pre-optimisation) CV."""
+    phase_key = _phase_key(resume_text, job_description)
+    hm_fb_key = f"{phase_key}:original"
+
+    if st.session_state.get(SessionKey.HM_FEEDBACK_CACHE_KEY) == hm_fb_key:
+        return st.session_state.get(SessionKey.MANAGER_COMMENT)
+
+    try:
+        with st.spinner("Getting hiring manager feedback on your original CV…"):
+            comment = get_hiring_manager_comment(
+                resume_text,
+                job_description,
+                int(ats_result.get("score", 0)),
+                optimised_text=None,
+            )
+    except RateLimitError:
+        st.warning(RATE_LIMIT_WARNING)
+        return None
+    if comment is None:
+        return None
+    if comment.startswith("Groq API error"):
+        st.error(comment)
+        return None
+    st.session_state[SessionKey.MANAGER_COMMENT] = comment
+    st.session_state[SessionKey.HM_FEEDBACK_CACHE_KEY] = hm_fb_key
+    return comment
+
+
+def _fetch_optimised_hiring_manager_comment(
+    resume_text: str,
+    job_description: str,
+    optimised_score: int,
+    optimised_cv_text: str,
+) -> str | None:
+    """Hiring manager feedback comparing original CV to the optimised version."""
+    phase_key = _phase_key(resume_text, job_description)
+    fp = hashlib.sha256(optimised_cv_text.encode()).hexdigest()[:20]
+    hm_key = f"{phase_key}:optimised:{fp}"
+
+    cached = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
+    if st.session_state.get("_optimised_hm_cache_key") == hm_key and cached:
+        return cached
+
+    try:
+        with st.spinner("Getting hiring manager feedback on your optimised CV…"):
+            comment = get_hiring_manager_comment(
+                resume_text,
+                job_description,
+                optimised_score,
+                optimised_text=optimised_cv_text,
+            )
+    except RateLimitError:
+        st.warning(RATE_LIMIT_WARNING)
+        return None
+    if comment is None:
+        return None
+    if comment.startswith("Groq API error"):
+        st.error(comment)
+        return None
+    st.session_state[SessionKey.OPTIMISED_MANAGER_COMMENT] = comment
+    st.session_state["_optimised_hm_cache_key"] = hm_key
+    return comment
+
+
+def _score_optimised_cv(od: dict, job_description: str) -> dict:
+    """ATS score for the optimised CV plaintext."""
+    cv_text = cv_plaintext_for_ats_scoring(od)
+    return calculate_ats_score_cached(cv_text, job_description)
+
+
+def render_optimised_cv_results(
+    resume_text: str,
+    job_description: str,
+    original_ats: dict,
+) -> None:
+    """Show ATS score and hiring manager comment for the optimised CV."""
+    od = st.session_state.get(SessionKey.OPTIMIZED_DATA)
+    if not isinstance(od, dict) or od.get("error"):
+        return
+
+    opt_ats = st.session_state.get(SessionKey.OPTIMISED_ATS_RESULT)
+    if not isinstance(opt_ats, dict):
+        with st.spinner("Scoring optimised CV against this role…"):
+            opt_ats = _score_optimised_cv(od, job_description)
+        st.session_state[SessionKey.OPTIMISED_ATS_RESULT] = opt_ats
+
+    orig_score = int(original_ats.get("score", 0))
+    opt_score = int(opt_ats.get("score", 0))
+    render_optimised_results_header(orig_score, opt_score)
+    render_score_panel(opt_ats)
+    render_keyword_section(
+        "Matched keywords (optimised)",
+        opt_ats.get("matched_keywords") or [],
+        "matched",
+        len(opt_ats.get("matched_keywords") or []),
+    )
+    render_keyword_section(
+        "Missing keywords (optimised)",
+        opt_ats.get("missing_keywords") or [],
+        "missing",
+        len(opt_ats.get("missing_keywords") or []),
+    )
+    insight = opt_ats.get("insight")
+    if insight:
+        render_insight(str(insight))
+
+    opt_cv_text = render_cv_to_text(od).strip()
+    comment = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
+    if not comment or not str(comment).strip():
+        comment = _fetch_optimised_hiring_manager_comment(
+            resume_text,
+            job_description,
+            opt_score,
+            opt_cv_text,
+        )
+    render_hiring_manager_comment(
+        comment,
+        label="Optimised CV · hiring manager view",
+    )
+
+
 def render_ai_coach_panel(
     resume_text: str,
     job_description: str,
     ats_result: dict,
 ) -> None:
-    """Hiring manager comment and general AI feedback."""
-    phase_key = _phase_key(resume_text, job_description)
-    od_hm = st.session_state.get(SessionKey.OPTIMIZED_DATA)
-    opt_plain = ""
-    if isinstance(od_hm, dict) and not od_hm.get("error"):
-        opt_plain = render_cv_to_text(od_hm).strip()
-    fp = hashlib.sha256(opt_plain.encode()).hexdigest()[:20] if opt_plain else "none"
-    hm_fb_key = f"{phase_key}:{fp}"
-
-    if st.session_state.get(SessionKey.HM_FEEDBACK_CACHE_KEY) != hm_fb_key:
-        try:
-            with st.spinner("Getting honest feedback from a hiring manager…"):
-                comment = get_hiring_manager_comment(
-                    resume_text,
-                    job_description,
-                    ats_result["score"],
-                    optimised_text=opt_plain if opt_plain else None,
-                )
-        except RateLimitError:
-            st.warning(RATE_LIMIT_WARNING)
-            return
-        if comment is None:
-            return
-        if comment.startswith("Groq API error"):
-            st.error(comment)
-            return
-        st.session_state[SessionKey.MANAGER_COMMENT] = comment
-        st.session_state[SessionKey.HM_FEEDBACK_CACHE_KEY] = hm_fb_key
-    else:
-        comment = st.session_state.get(SessionKey.MANAGER_COMMENT)
-
-    render_hiring_manager_comment(comment)
+    """Hiring manager comment (original CV) and general AI feedback."""
+    emit_html('<p class="al-results-label">Original resume</p>')
+    comment = _fetch_original_hiring_manager_comment(resume_text, job_description, ats_result)
+    render_hiring_manager_comment(
+        comment,
+        label="Original CV · hiring manager view",
+    )
 
     with st.expander("More coaching tools", expanded=False):
         if st.button("Get general AI feedback", use_container_width=True):
@@ -405,10 +512,20 @@ def render_optimiser_panel(
                 st.session_state[SessionKey.OPTIMISED_CV] = str(result)
                 st.warning("Could not format optimised CV as text; showing raw summary.")
             st.session_state.pop(SessionKey.HM_FEEDBACK_CACHE_KEY, None)
-            done_msg = "Optimisation complete. Download your DOCX below."
-            ach = result.get("_ats_score_achieved")
-            if isinstance(ach, int):
-                done_msg += f" Estimated whitelist overlap after this pass: {ach}%."
+            st.session_state.pop(SessionKey.OPTIMISED_MANAGER_COMMENT, None)
+            st.session_state.pop("_optimised_hm_cache_key", None)
+            with st.spinner("Scoring optimised CV…"):
+                opt_ats = _score_optimised_cv(result, job_description)
+            st.session_state[SessionKey.OPTIMISED_ATS_RESULT] = opt_ats
+            opt_cv_text = st.session_state.get(SessionKey.OPTIMISED_CV, "")
+            if isinstance(opt_cv_text, str) and opt_cv_text.strip():
+                _fetch_optimised_hiring_manager_comment(
+                    resume_text,
+                    job_description,
+                    int(opt_ats.get("score", 0)),
+                    opt_cv_text.strip(),
+                )
+            done_msg = "Optimisation complete — see your optimised score and hiring manager feedback below."
             st.success(done_msg)
             if settings.debug_mode:
                 debug = result.get("_ats_debug")
@@ -422,8 +539,11 @@ def render_optimiser_panel(
         if st.button("Reset optimised CV", use_container_width=True):
             for key in (
                 SessionKey.OPTIMIZED_DATA,
+                SessionKey.OPTIMISED_ATS_RESULT,
                 SessionKey.HM_FEEDBACK_CACHE_KEY,
                 SessionKey.MANAGER_COMMENT,
+                SessionKey.OPTIMISED_MANAGER_COMMENT,
+                "_optimised_hm_cache_key",
                 SessionKey.ATS_RESULT,
             ):
                 st.session_state.pop(key, None)
@@ -431,6 +551,7 @@ def render_optimiser_panel(
 
     od = st.session_state.get(SessionKey.OPTIMIZED_DATA)
     if isinstance(od, dict) and not od.get("error"):
+        render_optimised_cv_results(resume_text, job_description, ats_result)
         if settings.debug_mode:
             debug = od.get("_ats_debug")
             if isinstance(debug, dict):
@@ -547,6 +668,7 @@ def render_results_container(
             st.session_state[SessionKey.ANALYSE_DONE_ID] = run_id
 
         _render_resume_preview(resume_text)
+        emit_html('<p class="al-results-label">Original resume · ATS score</p>')
         _display_ats_results(ats_result)
         render_optimiser_panel(resume_text, job_description, ats_result)
         render_ai_coach_panel(resume_text, job_description, ats_result)
@@ -556,6 +678,7 @@ def render_results_container(
     cached_resume = st.session_state.get(SessionKey.RESUME_TEXT)
     if ready and run_id > 0 and isinstance(cached_ats, dict) and cached_resume:
         _render_resume_preview(str(cached_resume))
+        emit_html('<p class="al-results-label">Original resume · ATS score</p>')
         _display_ats_results(cached_ats)
         render_optimiser_panel(str(cached_resume), job_description, cached_ats)
         render_ai_coach_panel(str(cached_resume), job_description, cached_ats)
