@@ -18,6 +18,15 @@ _SECRETS_FIELD_MAP: dict[str, str] = {
     "DEBUG_MODE": "debug_mode",
 }
 
+_PLACEHOLDER_MARKERS = (
+    "your_actual_key_here",
+    "your-key",
+    "your_key",
+    "changeme",
+    "replace_me",
+    "gsk_xxx",
+)
+
 _API_KEY_HELP = (
     "Set GROQ_API_KEY in a local `.env` file, or in Streamlit Cloud under "
     "App settings → Secrets (TOML: GROQ_API_KEY = \"your-key\"). "
@@ -69,6 +78,13 @@ def _streamlit_secrets_overrides() -> dict[str, Any]:
     return overrides
 
 
+def _is_placeholder_key(key: str) -> bool:
+    lowered = key.strip().lower()
+    if not lowered:
+        return True
+    return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
+
+
 class Settings(BaseSettings):
     """Runtime configuration for Applylytics."""
 
@@ -93,18 +109,28 @@ def load_settings() -> Settings:
     return Settings(**_streamlit_secrets_overrides())
 
 
+def bootstrap_settings() -> Settings:
+    """Load settings once at app startup (safe for Streamlit Cloud secrets)."""
+    global settings
+    settings = load_settings()
+    return settings
+
+
 def resolve_groq_api_key() -> str:
     """Return Groq API key from secrets, env, or .env (refreshed each call)."""
     sync_streamlit_secrets_to_environ()
     current = load_settings()
     key = (current.groq_api_key or "").strip()
-    if key:
+    if not key:
+        key = (os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    if key and not _is_placeholder_key(key):
         return key
-    return (os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+    return ""
 
 
 def api_key_help_message() -> str:
     return _API_KEY_HELP
 
 
-settings = load_settings()
+# Populated by bootstrap_settings() in app.py before other applylytics imports.
+settings: Settings = Settings()
