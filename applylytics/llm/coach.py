@@ -42,13 +42,18 @@ def get_hiring_manager_comment(
     job_text: str,
     ats_score: int,
     optimised_text: str | None = None,
+    *,
+    fresh_review: bool = False,
 ) -> str | None:
     """Hiring manager brief. Returns None on missing API key; raises RateLimitError on quota."""
     if require_groq_api_key() is None:
         return None
     client = get_groq_client()
     resume, job = prepare_resume_job_texts(resume_text, job_text)
-    prompt = prompts.hiring_manager_prompt(resume, job, ats_score, optimised_text)
+    if fresh_review:
+        prompt = prompts.hiring_manager_fresh_review_prompt(resume, job, ats_score)
+    else:
+        prompt = prompts.hiring_manager_prompt(resume, job, ats_score, optimised_text)
     gemini = get_gemini_client()
     gemini_model = get_gemini_model() if gemini else None
     response, err = safe_groq_chat_create(

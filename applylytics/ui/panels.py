@@ -321,10 +321,10 @@ def _fetch_optimised_hiring_manager_comment(
     optimised_score: int,
     optimised_cv_text: str,
 ) -> str | None:
-    """Hiring manager feedback comparing original CV to the optimised version."""
+    """Hiring manager feedback on the optimised CV only (no before/after comparison)."""
     phase_key = _phase_key(resume_text, job_description)
     fp = hashlib.sha256(optimised_cv_text.encode()).hexdigest()[:20]
-    hm_key = f"{phase_key}:optimised:{fp}"
+    hm_key = f"{phase_key}:optimised:{fp}:fresh_v2"
 
     cached = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
     if st.session_state.get("_optimised_hm_cache_key") == hm_key and cached:
@@ -333,10 +333,10 @@ def _fetch_optimised_hiring_manager_comment(
     try:
         with st.spinner("Getting hiring manager feedback on your optimised CV…"):
             comment = get_hiring_manager_comment(
-                resume_text,
+                optimised_cv_text,
                 job_description,
                 optimised_score,
-                optimised_text=optimised_cv_text,
+                fresh_review=True,
             )
     except RateLimitError:
         st.warning(RATE_LIMIT_WARNING)
