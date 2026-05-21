@@ -708,9 +708,10 @@ button[data-testid="stBaseButton-primary"]:not([data-key="btn_optimise_cv"]):not
   position: absolute;
   inset: 0;
   display: flex;
-  flex-direction: column;
-  align-items: center;
+  flex-direction: row;
+  align-items: baseline;
   justify-content: center;
+  gap: 1px;
   pointer-events: none;
 }
 .al-ring-num {
@@ -721,9 +722,10 @@ button[data-testid="stBaseButton-primary"]:not([data-key="btn_optimise_cv"]):not
   line-height: 1;
 }
 .al-ring-pct {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-tertiary);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  line-height: 1;
 }
 .al-score-meta { flex: 1; min-width: 0; }
 .al-score-title {
