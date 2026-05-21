@@ -1,0 +1,1519 @@
+"""Applylytics — AI Resume Analyzer (Streamlit)."""
+import hashlib
+import html
+import json
+import os
+import re
+import tempfile
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from dotenv import load_dotenv
+from openai import OpenAI
+
+from utils import calculate_ats_score, calculate_recruiter_penalties, extract_text_from_pdf
+from utils.cv_generator import cv_context_from_structured, render_cv
+from utils.cv_optimizer import is_groq_rate_limit_error, safe_groq_chat_create
+
+load_dotenv()
+
+
+def _groq_api_key() -> str:
+    """Prefer GROQ_API_KEY so a separate Groq account can override OPENAI_API_KEY."""
+    return (os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()
+
+
+_APP_DIR = Path(__file__).resolve().parent
+_TEMPLATE_DIR = _APP_DIR / "templates"
+CV_TEMPLATE_DOCX = _TEMPLATE_DIR / "MasterTemplate.docx"
+
+_MODEL = (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+
+# Design system — single injectable block (dark theme, accessible palette)
+DESIGN_CSS = r"""
+@import url('https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --canvas: #0A0C10;
+  --card: #1E1E2F;
+  --glass: rgba(30, 30, 47, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --text-primary: #E0E0E0;
+  --text-secondary: #8E8E9A;
+  --accent: #5C6EF8;
+  --success: #10B981;
+  --warning: #F59E0B;
+  --error: #F43F5E;
+  --radius-lg: 24px;
+  --radius-pill: 40px;
+}
+
+html, body, .stApp {
+  background-color: var(--canvas) !important;
+  color: var(--text-primary) !important;
+  font-family: 'Inter', system-ui, sans-serif !important;
+  font-size: 14px !important;
+}
+
+[data-testid="stAppViewContainer"] {
+  background: var(--canvas) !important;
+}
+
+/* Sidebar glass */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, rgba(30,30,47,0.95) 0%, rgba(10,12,16,0.98) 100%) !important;
+  border-right: 1px solid var(--glass-border) !important;
+}
+[data-testid="stSidebar"] > div:first-child {
+  background: transparent !important;
+}
+[data-testid="stSidebar"] .stMarkdown, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span,
+[data-testid="stSidebar"] label, [data-testid="stSidebar"] small {
+  color: var(--text-primary) !important;
+}
+[data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] [data-testid="stMetricLabel"] {
+  color: var(--text-secondary) !important;
+}
+
+/* Main blocks */
+[data-testid="stHeader"] {
+  background: transparent !important;
+}
+
+.ds-hero {
+  background: linear-gradient(135deg, rgba(92,110,248,0.25) 0%, rgba(30,30,47,0.9) 50%, rgba(10,12,16,0.95) 100%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 1.75rem 2rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 20px 50px -20px rgba(0,0,0,0.5);
+}
+.ds-hero h1 {
+  font-size: 36px;
+  font-weight: 600;
+  margin: 0 0 0.35rem 0;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+.ds-hero p {
+  font-size: 16px;
+  margin: 0;
+  color: var(--text-secondary);
+  max-width: 52rem;
+  line-height: 1.5;
+}
+
+.glass-card {
+  background: var(--glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1rem;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.glass-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 30px -10px rgba(0,0,0,0.3);
+}
+
+.section-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-secondary);
+  margin: 0 0 0.65rem 0.1rem;
+}
+
+/* Buttons */
+.stButton > button {
+  border-radius: var(--radius-pill) !important;
+  padding: 0.5rem 1.5rem !important;
+  font-weight: 600 !important;
+  font-size: 14px !important;
+  border: none !important;
+  background: linear-gradient(135deg, #5C6EF8 0%, #3d4fd9 100%) !important;
+  color: #fff !important;
+  transition: transform 0.18s ease, box-shadow 0.18s ease !important;
+  box-shadow: 0 4px 18px rgba(92, 110, 248, 0.35) !important;
+}
+.stButton > button:hover {
+  transform: scale(1.02) !important;
+  box-shadow: 0 8px 28px rgba(92, 110, 248, 0.45) !important;
+}
+.stButton > button:active {
+  transform: scale(0.98) !important;
+}
+
+/* Secondary outline buttons in columns */
+.ds-btn-secondary .stButton > button {
+  background: rgba(92,110,248,0.15) !important;
+  color: var(--accent) !important;
+  border: 1px solid rgba(92,110,248,0.4) !important;
+  box-shadow: none !important;
+}
+
+/* Metrics glow */
+.ds-metric-glow [data-testid="stMetricValue"] {
+  color: var(--text-primary) !important;
+  text-shadow: 0 0 18px rgba(92, 110, 248, 0.55);
+  font-size: 20px !important;
+  font-weight: 600 !important;
+}
+.ds-metric-glow [data-testid="stMetricLabel"] {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+}
+
+/* Score hero */
+.score-hero-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1rem 0 1.25rem;
+}
+.score-svg-wrap {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  filter: drop-shadow(0 0 12px rgba(92, 110, 248, 0.35));
+}
+.score-svg-wrap svg {
+  width: 180px;
+  height: 180px;
+}
+.score-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  text-align: center;
+}
+.score-num {
+  font-size: 4rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, #8b9cff 0%, #5C6EF8 40%, #10B981 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 0 32px rgba(92, 110, 248, 0.55);
+}
+.score-pct {
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  -webkit-text-fill-color: var(--text-secondary);
+}
+.score-sub {
+  margin-top: 0.75rem;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.score-kw {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 0.25rem;
+  font-family: 'Geist Mono', ui-monospace, monospace;
+}
+.score-insight {
+  margin-top: 0.75rem;
+  font-size: 14px;
+  color: var(--text-secondary);
+  text-align: center;
+  max-width: 40rem;
+  line-height: 1.5;
+}
+
+.kw-card {
+  background: rgba(30, 30, 47, 0.55);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 1rem 1.1rem;
+  margin-top: 0.75rem;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+.kw-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 28px -12px rgba(0,0,0,0.35);
+}
+.kw-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.02em;
+}
+
+/* Chips */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+.chip {
+  display: inline-block;
+  padding: 0.28rem 0.65rem;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: 'Geist Mono', ui-monospace, monospace;
+  transition: transform 0.15s ease;
+}
+.chip:hover {
+  transform: scale(1.04);
+}
+.chip-matched {
+  background: #10B981;
+  color: #0A0C10;
+  font-weight: 600;
+}
+.chip-missing {
+  background: #F43F5E;
+  color: #ffffff;
+  font-weight: 500;
+}
+.chip-more {
+  background: rgba(255,255,255,0.08);
+  color: var(--text-secondary);
+}
+
+/* Technical / preview */
+.mono-block, textarea, [data-testid="stTextArea"] textarea {
+  font-family: 'Geist Mono', ui-monospace, monospace !important;
+  font-size: 12px !important;
+}
+
+/* Skeleton */
+.skeleton-block {
+  height: 140px;
+  border-radius: 16px;
+  background: linear-gradient(90deg, #1E1E2F 0%, #2a2a3f 45%, #1E1E2F 90%);
+  background-size: 200% 100%;
+  animation: ds-shimmer 1.25s ease-in-out infinite;
+  border: 1px solid var(--glass-border);
+}
+@keyframes ds-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Streamlit widgets on dark */
+.stTextInput input, .stTextArea textarea, [data-baseweb="textarea"] {
+  background: rgba(10,12,16,0.6) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--glass-border) !important;
+}
+.stExpander {
+  background: rgba(30,30,47,0.5) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 16px !important;
+}
+
+/* Glass bordered Streamlit containers (bento cards) */
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: var(--glass) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: var(--radius-lg) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 20px 30px -10px rgba(0,0,0,0.3);
+}
+
+/* Metric glow (main canvas) */
+.block-container [data-testid="stMetric"] {
+  background: rgba(92,110,248,0.08) !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(92,110,248,0.22) !important;
+  padding: 0.35rem 0.5rem !important;
+}
+.block-container [data-testid="stMetricValue"] {
+  color: var(--text-primary) !important;
+  text-shadow: 0 0 18px rgba(92, 110, 248, 0.55) !important;
+  font-size: 2.35rem !important;
+  font-weight: 700 !important;
+}
+.block-container [data-testid="stMetricLabel"] {
+  color: var(--text-secondary) !important;
+  font-size: 12px !important;
+}
+
+/* Info / status */
+.stAlert {
+  background: rgba(92,110,248,0.12) !important;
+  border: 1px solid rgba(92,110,248,0.25) !important;
+  color: var(--text-primary) !important;
+}
+
+@media (max-width: 900px) {
+  [data-testid="stHorizontalBlock"] {
+    flex-direction: column !important;
+  }
+  [data-testid="column"] {
+    width: 100% !important;
+    min-width: 100% !important;
+  }
+}
+"""
+
+
+def inject_design_system() -> None:
+    """Font Awesome CDN + full design-system CSS (per spec: markdown style injection)."""
+    st.markdown(
+        '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer" />',
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"<style>{DESIGN_CSS}</style>", unsafe_allow_html=True)
+
+
+def analyze_resume_with_job(resume_text: str, job_text: str) -> str | None:
+    """Send both resume and job description to Groq for targeted feedback. Returns None on rate limit (UI silent)."""
+    api_key = _groq_api_key()
+    if not api_key:
+        return "Set GROQ_API_KEY or OPENAI_API_KEY in your `.env` file to enable AI analysis."
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+    )
+
+    prompt = f"""
+Resume:
+{resume_text[:60000]}
+
+Job Description:
+{job_text[:60000]}
+"""
+
+    response, err = safe_groq_chat_create(
+        client,
+        model=_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are an expert resume coach and ATS specialist. Analyze the resume against the job description. Provide concise feedback: strengths (what matches well), gaps (what's missing from the job description), and 3-5 actionable improvements specifically tailored to this job.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.4,
+    )
+    if err:
+        return None if is_groq_rate_limit_error(err) else err
+    return response.choices[0].message.content or ""
+
+
+def get_hiring_manager_comment(
+    resume_text: str,
+    job_text: str,
+    ats_score: int,
+    optimised_text: str | None = None,
+) -> str | None:
+    """
+    Return a detailed, honest, actionable hiring manager brief (roughly 100–200 words).
+    Returns None on Groq rate limit (UI silent).
+    """
+    api_key = _groq_api_key()
+    if not api_key:
+        return "Set GROQ_API_KEY or OPENAI_API_KEY in your .env file to enable this feature."
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+
+    if optimised_text and optimised_text.strip():
+        prompt = f"""You are a senior UK hiring manager with 15 years of experience. You've just reviewed the original CV (ATS score {ats_score}%) and an optimised version. Write a **detailed feedback brief** (150-200 words) that:
+
+1. Picks **two or three specific sections** (e.g., Personal Statement, Work Experience bullet points, Skills list).
+2. For each section, say: "In your original CV, [problem]. If it were like [exact quote or example from the optimised version], I would have been impressed."
+3. Add one **specific, actionable piece of advice** that would make the candidate shortlisted.
+4. End with a shortlist verdict: "Based on the optimised version, I would [definitely / probably / maybe] invite you for an interview."
+
+Use a professional but direct tone – not sarcastic, but honest. Write in paragraphs.
+
+Job description snippet:
+{job_text[:1200]}
+
+Original CV (first 1500 chars):
+{resume_text[:1500]}
+
+Optimised CV (first 1500 chars):
+{optimised_text[:1500]}
+
+Output ONLY the feedback brief – no extra labels."""
+    else:
+        prompt = f"""You are a senior UK hiring manager. Review this CV (ATS score {ats_score}%) and write a **detailed feedback brief** (120-180 words) that:
+
+1. Highlights one section that needs improvement.
+2. Gives a concrete example of what would impress you: "If your [section] were like [rewritten example], I would have been impressed."
+3. Provides two specific, actionable recommendations.
+4. Ends with an honest shortlist verdict.
+
+Job description snippet:
+{job_text[:1200]}
+
+CV (first 1500 chars):
+{resume_text[:1500]}
+
+Output ONLY the feedback brief."""
+
+    response, err = safe_groq_chat_create(
+        client,
+        model=_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.6,
+    )
+    if err:
+        return None if is_groq_rate_limit_error(err) else err
+    return (response.choices[0].message.content or "").strip()
+
+
+def _cv_json_for_refinement(data: dict) -> dict:
+    """Strip internal keys before sending CV JSON to the model."""
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if not str(k).startswith("_")}
+
+
+def refine_cv_with_feedback(current_cv_json: dict, job_text: str, feedback_text: str) -> dict:
+    """Rewrite CV JSON to address every point in the hiring manager's feedback without inventing facts."""
+    api_key = _groq_api_key()
+    if not api_key:
+        return {"error": "Set GROQ_API_KEY or OPENAI_API_KEY in .env"}
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+
+    system_prompt = """You are a CV expert. You will receive a CV (JSON) and honest feedback from a hiring manager. Rewrite the CV to address EVERY point in the feedback. Keep all factual information true. You may rephrase bullet points, add missing keywords that the candidate genuinely possesses, reorder sections, or adjust the personal statement. Do NOT invent false jobs, dates, or qualifications. Return a new JSON object with exactly these keys: name, contact_phone, contact_email, contact_location, linkedin, personal_statement, key_skills (array of strings), work_experience, education, skills, certifications, interests, references. Output ONLY valid JSON — no markdown fences or commentary."""
+
+    payload = _cv_json_for_refinement(current_cv_json)
+    current_cv_str = json.dumps(payload, indent=2, ensure_ascii=False)
+    if len(current_cv_str) > 28000:
+        current_cv_str = current_cv_str[:28000] + "\n… (truncated)"
+
+    user_prompt = f"""Job description (for context; honour the feedback first):
+{(job_text or '')[:10000]}
+
+Hiring manager feedback (address all points):
+{(feedback_text or '')[:12000]}
+
+Current CV (JSON):
+{current_cv_str}
+
+Output improved JSON only."""
+
+    create_kwargs: dict = dict(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.4,
+    )
+    response, err = safe_groq_chat_create(
+        client,
+        **create_kwargs,
+        response_format={"type": "json_object"},
+    )
+    if err:
+        if is_groq_rate_limit_error(err):
+            return {"rate_limited": True}
+        response, err2 = safe_groq_chat_create(client, **create_kwargs)
+        if err2:
+            if is_groq_rate_limit_error(err2):
+                return {"rate_limited": True}
+            return {"error": err2}
+
+    raw = response.choices[0].message.content
+    parsed = _parse_json_from_ai(raw)
+    if parsed.get("error"):
+        return {
+            "error": f"Invalid JSON from refinement: {parsed.get('error')}",
+            "raw": parsed.get("raw", str(raw)[:2000] if raw else ""),
+        }
+    return parsed
+
+
+_SKILL_REVIEW_NOISE = frozenset(
+    {
+        "investigate",
+        "requests",
+        "workflows",
+        "governance",
+        "ai tools",
+        "chatgpt",
+        "gemini",
+        "claude",
+        "supply chain management",
+    }
+)
+
+
+def _strip_noise_skills_from_review_cv(data: dict) -> None:
+    """Drop low-signal tokens the model sometimes copies from review layout (in-place)."""
+    for key in ("skills", "key_skills"):
+        xs = data.get(key)
+        if not isinstance(xs, list):
+            continue
+        cleaned: list[str] = []
+        for s in xs:
+            if not isinstance(s, str):
+                continue
+            t = s.strip()
+            if not t:
+                continue
+            if t.lower() in _SKILL_REVIEW_NOISE:
+                continue
+            cleaned.append(t)
+        data[key] = cleaned
+
+
+def optimize_cv_from_review(
+    original_cv_text: str,
+    review_text: str,
+    job_text: str = "",
+) -> dict:
+    """
+    Assemble CV JSON by copying improved wording from the expert review verbatim where given.
+    Falls back to original CV text only where the review does not supply an exact rewrite.
+    """
+    api_key = _groq_api_key()
+    if not api_key:
+        return {"error": "Set GROQ_API_KEY or OPENAI_API_KEY in .env"}
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+
+    system_prompt = """You are a text assembler. The user will provide an expert review that contains EXACT rewritten versions of CV sections (profile, bullet points, skills list, etc.). Your job is to extract those exact strings and arrange them into a JSON CV structure. Do not rewrite, rephrase, or improve further. Copy verbatim.
+
+Rules:
+- If the review says "Rewritten:" or shows a bullet point with a dash or number, use that exact text.
+- For the profile, use the exact paragraph under "Stronger Professional Summary" or similar heading when present.
+- For work experience bullets, use the improved bullets exactly as written in the review (e.g. lines starting with action verbs the review provides).
+- For skills, use the categorised list exactly as shown (Technical, Analytical, Business) as a flat `skills` array of strings in that order — do not add filler single words.
+- Include `key_skills` (array of strings): copy the first 8–12 entries from that same flat skills list in order (still verbatim from the review); if the review only gives a flat list, mirror the first entries into `key_skills`.
+- Remove Interests and References as sections: set both to empty strings.
+- Use the original CV text only for name, contact fields, LinkedIn, and any section the review does not rewrite; keep employers, titles, and dates aligned with the original CV unless the review explicitly fixes a typo.
+- Required JSON keys (all present): name, contact_phone, contact_email, contact_location, linkedin, personal_statement, key_skills, work_experience (list of objects with job_title, employer, dates, bullets), education (list of objects with degree, institution, dates, grade), skills, certifications, interests, references.
+
+If the review does not provide an exact rewrite for a section, keep the original content from the original CV for that section while still applying structural rules (e.g. empty interests/references when dropping those sections).
+
+Output ONLY valid JSON — no markdown fences or commentary."""
+
+    user_prompt = f"""Original CV (for name/contacts and unchanged sections):
+{(original_cv_text or '')[:3000]}
+
+Expert review (copy the exact improved versions from here):
+{(review_text or '')[:10000]}
+
+Job description (for context, not for rewriting):
+{(job_text or '')[:1500]}
+
+Assemble the JSON as instructed. Output only valid JSON."""
+
+    create_kwargs: dict = dict(
+        model=_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.1,
+    )
+    response, err = safe_groq_chat_create(
+        client,
+        **create_kwargs,
+        response_format={"type": "json_object"},
+    )
+    if err:
+        if is_groq_rate_limit_error(err):
+            return {"rate_limited": True}
+        response, err2 = safe_groq_chat_create(client, **create_kwargs)
+        if err2:
+            if is_groq_rate_limit_error(err2):
+                return {"rate_limited": True}
+            return {"error": err2}
+
+    raw = response.choices[0].message.content
+    parsed = _parse_json_from_ai(raw)
+    if parsed.get("error"):
+        return {
+            "error": f"Invalid JSON from review-based assembly: {parsed.get('error')}",
+            "raw": parsed.get("raw", str(raw)[:2000] if raw else ""),
+        }
+
+    _strip_noise_skills_from_review_cv(parsed)
+    sk = parsed.get("skills")
+    if (not isinstance(parsed.get("key_skills"), list) or not parsed.get("key_skills")) and isinstance(sk, list):
+        parsed["key_skills"] = [s for s in sk if isinstance(s, str) and s.strip()][:12]
+
+    return parsed
+
+
+def generate_interview_questions(resume_text: str, job_text: str, missing_keywords_str: str) -> str | None:
+    """Returns None on Groq rate limit (UI silent)."""
+    api_key = _groq_api_key()
+    if not api_key:
+        return "Set GROQ_API_KEY or OPENAI_API_KEY in your `.env` file to enable AI analysis."
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+    )
+
+    prompt = f"""You are a hiring manager for this job description. The candidate's resume is missing these key skills: {missing_keywords_str}. Generate 5-7 interview questions that:
+- Probe their existing experience (from resume)
+- Assess their ability to learn the missing skills
+- Mix behavioural and technical questions
+
+Job description:
+{job_text[:30000]}
+
+Resume summary:
+{resume_text[:15000]}
+"""
+    response, err = safe_groq_chat_create(
+        client,
+        model=_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+    )
+    if err:
+        return None if is_groq_rate_limit_error(err) else err
+    return response.choices[0].message.content or ""
+
+
+def generate_improvement_suggestions(resume_text: str, job_text: str, missing_keywords_str: str) -> str | None:
+    """Returns None on Groq rate limit (UI silent)."""
+    api_key = _groq_api_key()
+    if not api_key:
+        return "Set GROQ_API_KEY or OPENAI_API_KEY in your `.env` file to enable AI analysis."
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+    )
+
+    prompt = f"""You are an expert resume coach. The candidate applied for the job above but their resume lacks these skills: {missing_keywords_str}. Provide 3-5 specific, actionable improvements to add or rewrite parts of the resume to include these missing skills. Be concrete (e.g., "Under 'Experience', add bullet: Prepared monthly financial forecasts using Excel and Power BI").
+
+Job description:
+{job_text[:30000]}
+
+Current resume:
+{resume_text[:15000]}
+"""
+    response, err = safe_groq_chat_create(
+        client,
+        model=_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+    )
+    if err:
+        return None if is_groq_rate_limit_error(err) else err
+    return response.choices[0].message.content or ""
+
+
+def _parse_json_from_ai(raw: str | None) -> dict:
+    """Parse JSON from model output; strip markdown fences if present."""
+    if not raw or not str(raw).strip():
+        return {"error": "Empty AI response"}
+    s = str(raw).strip()
+    if s.startswith("```"):
+        sl = s.splitlines()
+        if sl and sl[0].strip().startswith("```"):
+            sl = sl[1:]
+        if sl and sl[-1].strip().startswith("```"):
+            sl = sl[:-1]
+        s = "\n".join(sl).strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", s)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
+        return {"error": "AI returned invalid JSON", "raw": s[:2000]}
+
+
+def _cv_plaintext_for_ats_scoring(data: dict) -> str:
+    """Flatten structured CV JSON for whitelist keyword overlap scoring."""
+    parts: list[str] = []
+    if data.get("personal_statement"):
+        parts.append(str(data["personal_statement"]))
+    for exp in data.get("work_experience") or []:
+        if not isinstance(exp, dict):
+            continue
+        parts.append(str(exp.get("job_title", "") or ""))
+        parts.append(str(exp.get("employer", "") or ""))
+        parts.extend(str(b) for b in (exp.get("bullets") or []) if b)
+    parts.extend(str(s) for s in (data.get("key_skills") or []) if s)
+    parts.extend(str(s) for s in (data.get("skills") or []) if s)
+    for edu in data.get("education") or []:
+        if not isinstance(edu, dict):
+            continue
+        for k in ("degree", "institution", "dates", "grade"):
+            v = edu.get(k)
+            if v:
+                parts.append(str(v))
+    parts.extend(str(c) for c in (data.get("certifications") or []) if c)
+    return "\n".join(parts)
+
+
+def render_cv_to_text(cv_json: dict) -> str:
+    """Convert optimised CV JSON to a plain text summary for the hiring manager prompt."""
+    text = f"Personal Statement: {cv_json.get('personal_statement', '')}\n\n"
+    text += "Work Experience:\n"
+    for exp in cv_json.get("work_experience") or []:
+        if not isinstance(exp, dict):
+            continue
+        text += f"- {exp.get('job_title', '')} at {exp.get('employer', '')} ({exp.get('dates', '')})\n"
+        for bullet in exp.get("bullets") or []:
+            text += f"  • {bullet}\n"
+    text += f"\nKey Skills: {', '.join(cv_json.get('key_skills') or [])}\n"
+    text += f"Skills: {', '.join(cv_json.get('skills') or [])}\n"
+    return text
+
+
+def optimize_resume_old(
+    resume_text: str,
+    job_text: str,
+    missing_keywords: list[str],
+    max_score_target: int = 75,
+) -> dict:
+    """
+    Legacy optimiser (retained for reference). Prefer ``optimize_cv_generic`` for production.
+    """
+    rt = (resume_text or "").strip()
+    if len(rt) < 80:
+        return {
+            "error": "Resume text is too short to optimise (PDF may be image-only or empty). "
+            "Re-upload a text-based PDF or check the extracted preview.",
+        }
+
+    api_key = _groq_api_key()
+    if not api_key:
+        return {"error": "Set GROQ_API_KEY or OPENAI_API_KEY in your .env file to enable AI analysis."}
+    client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+
+    target_keywords = [str(k) for k in (missing_keywords or []) if k][:40]
+    target_str = ", ".join(target_keywords)
+
+    system_prompt = """You are an expert UK CV writer specialising in ATS-style keyword overlap for this product. Rewrite and restructure the entire CV from the supplied resume text, keeping the same true experience, to maximise overlap with the role while staying honest.
+
+Rules:
+1. British spelling (organise, analyse, colour, etc.).
+2. Layout intent: single column, no graphics (content is JSON only; export is handled elsewhere).
+3. Include: name, contact (city + UK, phone, email, LinkedIn), personal statement (3-5 lines, no personal pronouns), work experience (reverse chronological, bullets with strong verbs and quantified results where the resume supports it), education, key_skills (8-10 items), skills (hard skills), certifications, interests (optional), references ("Available on request" or empty).
+4. Weave missing keywords from the user message into bullets and BOTH key_skills and skills where truthful. Do not force unnatural wording.
+5. Output a single JSON object only — no markdown fences or commentary.
+
+NON-NEGOTIABLE SOURCE RULES:
+- The ONLY source of facts is the "CURRENT RESUME" block. Do not substitute a demo, sample, fictional, or generic CV.
+- Do NOT invent employers, titles, dates, degrees, certifications, or achievements not supported by the CURRENT RESUME.
+- Do NOT use placeholder names or stock employers unless they appear verbatim in the CURRENT RESUME.
+- If a field is unknown, use "" or [] — never guess plausible fake contact details.
+- Keyword stability: when you use a phrase from the missing-keyword list, copy its exact surface form (spelling, hyphens, spacing, acronyms) so it can be detected after PDF export and re-upload.
+
+Required JSON shape (all keys present):
+{
+  "name": "string",
+  "contact_phone": "string",
+  "contact_email": "string",
+  "contact_location": "string (city, UK)",
+  "linkedin": "string (URL or empty)",
+  "personal_statement": "string",
+  "key_skills": ["string"],
+  "work_experience": [
+    {"job_title": "string", "employer": "string", "dates": "Month YYYY – Month YYYY", "bullets": ["string"]}
+  ],
+  "education": [
+    {"degree": "string", "institution": "string", "dates": "Month YYYY – Month YYYY", "grade": "string"}
+  ],
+  "skills": ["string"],
+  "certifications": ["string"],
+  "interests": "string",
+  "references": "string"
+}
+"""
+
+    best_data: dict | None = None
+    best_score = -1
+    jt = (job_text or "").strip()
+    job_excerpt = jt[:15000]
+    resume_excerpt = rt[:30000]
+
+    for attempt in range(3):
+        if attempt == 0:
+            feedback = ""
+        else:
+            feedback = (
+                f"\nPrevious attempt scored about {best_score}% on this role's keyword overlap. "
+                f"Incorporate more of these missing phrases naturally (exact wording when possible): {target_str}. "
+                "Strengthen key_skills, skills, and experience bullets; keep every fact grounded in the CURRENT RESUME."
+            )
+
+        user_prompt = f"""Job description (context):
+{job_excerpt}
+
+Missing keywords to incorporate (aim for strong coverage; only where truthful):
+{target_str or "(none listed — still align honestly with the job)"}
+
+=== CURRENT RESUME (AUTHORITATIVE) ===
+{resume_excerpt}
+{feedback}
+
+Return valid JSON only."""
+
+        create_kwargs: dict = dict(
+            model=_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
+        response, err = safe_groq_chat_create(
+            client,
+            **create_kwargs,
+            response_format={"type": "json_object"},
+        )
+        if err:
+            if is_groq_rate_limit_error(err):
+                return {"rate_limited": True}
+            response, err2 = safe_groq_chat_create(client, **create_kwargs)
+            if err2:
+                if is_groq_rate_limit_error(err2):
+                    return {"rate_limited": True}
+                return {"error": err2}
+
+        raw = response.choices[0].message.content
+        data = _parse_json_from_ai(raw)
+        if data.get("error"):
+            continue
+
+        try:
+            cv_text = _cv_plaintext_for_ats_scoring(data)
+            ats_result = calculate_ats_score(cv_text, jt)
+            score = int(ats_result.get("score", 0))
+        except Exception:
+            continue
+
+        if score > best_score:
+            best_score = score
+            best_data = dict(data)
+            if score >= max_score_target:
+                break
+
+    if best_data is None:
+        return {"error": "Could not generate a valid optimised CV after several attempts."}
+
+    best_data["_ats_score_achieved"] = best_score
+    return best_data
+
+
+def optimize_cv_generic(
+    resume_text: str,
+    job_text: str,
+    missing_keywords: list[str],
+    max_score_target: int = 75,
+) -> dict:
+    """
+    Recruiter-grade generic optimiser (strict rewrite pipeline in ``utils.cv_optimizer``).
+    Returns JSON for ``MasterTemplate.docx`` plus ``_ats_score_achieved`` when successful.
+    """
+    _ = max_score_target
+    from utils.cv_optimizer import is_groq_rate_limit_error, run_generic_cv_optimisation_pipeline
+
+    rt = (resume_text or "").strip()
+    mk = [str(k) for k in (missing_keywords or []) if k]
+    print(
+        "[applylytics] optimize_cv_generic() → pipeline | resume_chars=",
+        len(rt),
+        "| missing_keywords=",
+        len(mk),
+        flush=True,
+    )
+
+    out = run_generic_cv_optimisation_pipeline(
+        rt,
+        job_text=job_text or "",
+        missing_keywords=missing_keywords or [],
+    )
+    if is_groq_rate_limit_error(out):
+        return {"rate_limited": True}
+    if out.get("error"):
+        print("[applylytics] optimize_cv_generic() pipeline error:", out["error"], flush=True)
+        return out
+
+    jt = (job_text or "").strip()
+    try:
+        cv_text = _cv_plaintext_for_ats_scoring(out)
+        ats_result = calculate_ats_score(cv_text, jt)
+        out["_ats_score_achieved"] = int(ats_result.get("score", 0))
+    except Exception:
+        out["_ats_score_achieved"] = 0
+
+    ps = str(out.get("personal_statement", "") or "")
+    n_jobs = len(out.get("work_experience") or [])
+    n_bullets = sum(
+        len(exp.get("bullets") or [])
+        for exp in (out.get("work_experience") or [])
+        if isinstance(exp, dict)
+    )
+    print(
+        "[applylytics] optimize_cv_generic() OK | jobs=",
+        n_jobs,
+        "| bullets=",
+        n_bullets,
+        "| ats_estimate=",
+        out.get("_ats_score_achieved"),
+        flush=True,
+    )
+    print("[applylytics] personal_statement[:200]=", repr(ps[:200]), flush=True)
+    return out
+
+
+def render_chips(keywords: list[str], chip_type: str) -> str:
+    """
+    Build HTML for keyword chips (matched = green/dark text, missing = red/white).
+    chip_type: 'matched' | 'missing'
+    """
+    limit = 30
+    slice_kw = keywords[:limit]
+    extra = max(0, len(keywords) - limit)
+    cls = "chip chip-matched" if chip_type == "matched" else "chip chip-missing"
+    parts = [f'<span class="{cls}">{html.escape(k)}</span>' for k in slice_kw]
+    if extra:
+        parts.append(f'<span class="chip chip-more">+{extra} more</span>')
+    inner = "".join(parts) if parts else '<span class="chip chip-more">—</span>'
+    return f'<div class="chip-row">{inner}</div>'
+
+
+def display_ats_score(
+    score: int,
+    matched: list,
+    missing: list,
+    job_keyword_count: int,
+    insight: str | None = None,
+) -> None:
+    """ATS hero (SVG radial + gradient number), st.metric, and chip cards."""
+    if score >= 70:
+        accent = "#10B981"
+    elif score >= 40:
+        accent = "#F59E0B"
+    else:
+        accent = "#F43F5E"
+
+    r = 42
+    c = 264.0  # ~2 * pi * r
+    dash = c * (score / 100.0)
+
+    st.markdown(
+        f"""
+        <div class="score-hero-wrap">
+          <div class="score-svg-wrap">
+            <svg viewBox="0 0 100 100" aria-hidden="true">
+              <circle cx="50" cy="50" r="{r}" fill="none" stroke="#2d2d3d" stroke-width="8" />
+              <circle cx="50" cy="50" r="{r}" fill="none" stroke="{accent}" stroke-width="8"
+                stroke-dasharray="{dash:.2f} {c:.2f}" stroke-linecap="round"
+                transform="rotate(-90 50 50)" />
+            </svg>
+            <div class="score-center">
+              <div class="score-num">{score}<span class="score-pct">%</span></div>
+            </div>
+          </div>
+          <div class="score-sub">ATS Match Score</div>
+          <div class="score-kw">{job_keyword_count} whitelisted skill phrases in job text</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if insight:
+        st.markdown(
+            f'<p class="score-insight">{html.escape(insight)}</p>',
+            unsafe_allow_html=True,
+        )
+
+    st.metric(label="Match score (summary)", value=f"{score}%", delta=None)
+
+    st.markdown(
+        f"""
+        <div class="kw-card">
+          <div class="kw-card-title">Matched keywords</div>
+          {render_chips(matched, "matched")}
+        </div>
+        <div class="kw-card">
+          <div class="kw-card-title">Missing keywords</div>
+          {render_chips(missing, "missing")}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar(portfolio_url: str) -> None:
+    """Glass-styled sidebar: info, stats (pandas), GitHub link with Font Awesome."""
+    with st.sidebar:
+        st.markdown(
+            """
+            <div class="glass-card" style="margin-top:0.5rem;">
+              <p style="margin:0;font-size:20px;font-weight:600;color:#E0E0E0;">Applylytics</p>
+              <p style="margin:0.5rem 0 0;font-size:14px;color:#8E8E9A;line-height:1.45;">
+                Resume ↔ job fit, whitelist ATS overlap, and Groq Llama coaching.
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown('<p class="section-label" style="margin-top:1rem;">Quick stats</p>', unsafe_allow_html=True)
+        wc = st.session_state.get("_ui_word_count")
+        mp = st.session_state.get("_ui_match_pct")
+        jk = st.session_state.get("_ui_job_kw_count")
+        stats_df = pd.DataFrame(
+            {
+                "Metric": ["Resume words", "Skill match %", "Job skill phrases"],
+                "Value": [
+                    wc if wc is not None else "—",
+                    f"{mp}%" if mp is not None else "—",
+                    jk if jk is not None else "—",
+                ],
+            }
+        )
+        st.dataframe(stats_df, hide_index=True, use_container_width=True)
+
+        st.markdown('<p class="section-label" style="margin-top:1rem;">Links</p>', unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <a href="{html.escape(portfolio_url)}" target="_blank" rel="noopener noreferrer"
+               style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;
+               border-radius:40px;background:rgba(92,110,248,0.2);color:#5C6EF8;
+               text-decoration:none;font-weight:600;font-size:14px;border:1px solid rgba(92,110,248,0.35);">
+              <i class="fab fa-github" aria-hidden="true"></i> GitHub / portfolio
+            </a>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption("Set `PORTFOLIO_URL` in `.env` to customize the link target.")
+
+
+SKELETON_HTML = """
+<div class="skeleton-block" aria-busy="true"></div>
+<div class="skeleton-block" style="height:80px;margin-top:0.75rem;"></div>
+"""
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Applylytics",
+        page_icon="📄",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    portfolio_url = os.getenv("PORTFOLIO_URL", "https://github.com").strip() or "https://github.com"
+
+    inject_design_system()
+    render_sidebar(portfolio_url)
+
+    st.markdown(
+        """
+        <div class="ds-hero">
+          <h1>Applylytics</h1>
+          <p>Production-grade resume ↔ job analysis: whitelist ATS scoring, Groq Llama 3.3 insights, interview prep, structured CV optimisation, and editable DOCX export.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("##### :material/analytics: Overview")
+
+    col_left, col_right = st.columns([1, 1.5], gap="large")
+
+    with col_left:
+        st.markdown("##### :material/upload_file: Resume")
+        with st.container(border=True):
+            uploaded = st.file_uploader(
+                "Resume (PDF)",
+                type=["pdf"],
+                help="Upload the CV you want scored against the role.",
+                label_visibility="visible",
+            )
+        st.markdown("##### :material/work: Job description")
+        with st.container(border=True):
+            job_description = st.text_area(
+                "Job description",
+                height=240,
+                placeholder="Paste the full job description (requirements, responsibilities, tools).",
+                help="Used for ATS keyword overlap and all AI prompts.",
+                label_visibility="visible",
+            )
+
+    with col_right:
+        st.markdown("##### :material/insights: Results")
+        with st.container(border=True):
+            if uploaded is not None and job_description.strip():
+                suffix = Path(uploaded.name).suffix or ".pdf"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(uploaded.getbuffer())
+                    tmp_path = tmp.name
+
+                try:
+                    with st.spinner("Extracting text from your PDF…"):
+                        resume_text = extract_text_from_pdf(tmp_path)
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
+
+                phase_key = f"{uploaded.name}:{getattr(uploaded, 'size', len(uploaded.getbuffer()))}:{len(resume_text)}:{hashlib.sha256(job_description.encode()).hexdigest()[:24]}"
+                if st.session_state.get("_phase3_key") != phase_key:
+                    st.session_state["_phase3_key"] = phase_key
+                    st.session_state.pop("interview_questions_md", None)
+                    st.session_state.pop("improvement_plan_md", None)
+                    st.session_state.pop("manager_comment", None)
+                    st.session_state.pop("_hm_feedback_cache_key", None)
+                    st.session_state.pop("_cv_from_review_plan", None)
+                    st.session_state.pop("optimized_data", None)
+                    st.session_state.pop("_docx_bytes", None)
+
+                word_count = len(resume_text.split())
+                st.session_state["_ui_word_count"] = word_count
+
+                with st.expander(":material/description: Extracted resume text (preview)", expanded=False):
+                    st.text_area(
+                        "Resume text",
+                        value=resume_text[:8000] + ("…" if len(resume_text) > 8000 else ""),
+                        height=220,
+                        label_visibility="collapsed",
+                    )
+
+                with st.spinner("Scoring whitelisted skill overlap against this role…"):
+                    ats_result = calculate_ats_score(resume_text, job_description)
+
+                st.session_state["_ui_match_pct"] = ats_result["score"]
+                st.session_state["_ui_job_kw_count"] = ats_result["job_keyword_count"]
+
+                display_ats_score(
+                    ats_result["score"],
+                    ats_result["matched_keywords"],
+                    ats_result["missing_keywords"],
+                    ats_result["job_keyword_count"],
+                    insight=ats_result.get("insight"),
+                )
+                st.caption(
+                    "How to read this score: it is the share of job-linked skill phrases (from our detector list) "
+                    "that also appear in the resume text **above after PDF extraction** — not a universal ATS grade. "
+                    "Saving a DOCX as PDF, changing wording, or column layout can change which phrases are extracted, "
+                    "so the percentage can go up or down even for the same career story. Always check the preview "
+                    "expander before trusting the number."
+                )
+
+                rp = calculate_recruiter_penalties(resume_text)
+                st.markdown("##### :material/rule_folder: Recruiter presentation check")
+                st.caption(
+                    "Heuristic only — **not** mixed into the ATS keyword score. "
+                    "Starts at 100 and subtracts points for common habits; use as a second opinion."
+                )
+                r1, r2 = st.columns([1, 2])
+                with r1:
+                    st.metric("Presentation score", f"{rp['adjusted_score']}")
+                    st.metric("Penalty points", f"{rp['total_deduction']}")
+                with r2:
+                    if rp["penalties"]:
+                        st.markdown("\n".join(f"- {html.escape(p)}" for p in rp["penalties"]))
+                    else:
+                        st.markdown("_No items from this checklist triggered._")
+
+                od_hm = st.session_state.get("optimized_data")
+                opt_plain = ""
+                if isinstance(od_hm, dict) and not od_hm.get("error"):
+                    opt_plain = render_cv_to_text(od_hm).strip()
+                fp = hashlib.sha256(opt_plain.encode()).hexdigest()[:20] if opt_plain else "none"
+                hm_fb_key = f"{phase_key}:{fp}"
+                if st.session_state.get("_hm_feedback_cache_key") != hm_fb_key:
+                    with st.spinner("Getting honest feedback from a hiring manager…"):
+                        comment = get_hiring_manager_comment(
+                            resume_text,
+                            job_description,
+                            ats_result["score"],
+                            optimised_text=opt_plain if opt_plain else None,
+                        )
+                    st.session_state["manager_comment"] = comment if comment is not None else ""
+                    st.session_state["_hm_feedback_cache_key"] = hm_fb_key
+                else:
+                    comment = st.session_state.get("manager_comment")
+
+                if comment:
+                    st.markdown("### 🗣️ Hiring Manager's Honest Feedback")
+                    st.info(comment)
+
+                od_refine = st.session_state.get("optimized_data")
+                if isinstance(od_refine, dict) and not od_refine.get("error"):
+                    if st.button("📈 Improve CV based on this feedback", use_container_width=True):
+                        with st.spinner("Revising CV to address feedback…"):
+                            improved = refine_cv_with_feedback(
+                                od_refine,
+                                job_description,
+                                st.session_state.get("manager_comment") or "",
+                            )
+                        if improved.get("rate_limited"):
+                            pass
+                        elif improved.get("error"):
+                            st.error(improved["error"])
+                        else:
+                            try:
+                                pt = _cv_plaintext_for_ats_scoring(improved)
+                                improved["_ats_score_achieved"] = int(
+                                    calculate_ats_score(pt, job_description)["score"]
+                                )
+                            except Exception:
+                                pass
+                            st.session_state["optimized_data"] = improved
+                            st.session_state.pop("_docx_bytes", None)
+                            st.session_state.pop("_hm_feedback_cache_key", None)
+                            st.session_state.pop("_cv_from_review_plan", None)
+                            st.success(
+                                "CV updated based on feedback. Scroll down for the preview and DOCX; "
+                                "manager feedback above will refresh on the next load."
+                            )
+                            st.rerun()
+
+                st.markdown("##### :material/smart_toy: AI coach")
+                if st.button(
+                    "🤖 Get General AI Feedback",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    ph = st.empty()
+                    ph.markdown(SKELETON_HTML, unsafe_allow_html=True)
+                    with st.spinner("Analyzing with Groq Llama 3.3…"):
+                        feedback = analyze_resume_with_job(resume_text, job_description)
+                    ph.empty()
+                    if feedback is not None:
+                        st.markdown("**AI feedback**")
+                        st.markdown(feedback)
+
+                missing_kw = ats_result["missing_keywords"]
+                missing_keywords_str = ", ".join(missing_kw[:300]) if missing_kw else "(none identified)"
+                st.markdown("##### :material/quiz: Interview & resume polish")
+                iq, ip = st.columns(2)
+                with iq:
+                    if st.button("🎯 Generate Interview Questions", use_container_width=True):
+                        ph = st.empty()
+                        ph.markdown(SKELETON_HTML, unsafe_allow_html=True)
+                        with st.spinner("Analyzing with Groq Llama 3.3…"):
+                            iq_md = generate_interview_questions(
+                                resume_text, job_description, missing_keywords_str
+                            )
+                        ph.empty()
+                        if iq_md is not None:
+                            st.session_state["interview_questions_md"] = iq_md
+                        else:
+                            st.session_state.pop("interview_questions_md", None)
+                with ip:
+                    if st.button("📝 Personalised Improvement Plan", use_container_width=True):
+                        ph = st.empty()
+                        ph.markdown(SKELETON_HTML, unsafe_allow_html=True)
+                        with st.spinner("Analyzing with Groq Llama 3.3…"):
+                            imp_md = generate_improvement_suggestions(
+                                resume_text, job_description, missing_keywords_str
+                            )
+                        ph.empty()
+                        if imp_md is not None:
+                            st.session_state["improvement_plan_md"] = imp_md
+                        else:
+                            st.session_state.pop("improvement_plan_md", None)
+
+                if st.session_state.get("interview_questions_md"):
+                    with st.expander(":material/forum: Interview questions", expanded=True):
+                        st.markdown(st.session_state["interview_questions_md"])
+
+                imp_plan = st.session_state.get("improvement_plan_md")
+                if imp_plan:
+                    with st.expander(":material/rule: Personalised improvement plan", expanded=True):
+                        st.markdown(imp_plan)
+                    if st.button(
+                        "📄 Generate CV following this review exactly",
+                        use_container_width=True,
+                        help="Assembles structured CV JSON by copying improved wording from this plan verbatim where it appears.",
+                    ):
+                        ph = st.empty()
+                        ph.markdown(SKELETON_HTML, unsafe_allow_html=True)
+                        with st.spinner("Applying every change from the review…"):
+                            new_cv_data = optimize_cv_from_review(
+                                resume_text,
+                                imp_plan,
+                                job_description,
+                            )
+                        ph.empty()
+                        if new_cv_data.get("rate_limited"):
+                            pass
+                        elif new_cv_data.get("error"):
+                            st.error(new_cv_data["error"])
+                        else:
+                            try:
+                                pt = _cv_plaintext_for_ats_scoring(new_cv_data)
+                                new_cv_data["_ats_score_achieved"] = int(
+                                    calculate_ats_score(pt, job_description)["score"]
+                                )
+                            except Exception:
+                                pass
+                            st.session_state["optimized_data"] = new_cv_data
+                            st.session_state.pop("_hm_feedback_cache_key", None)
+                            st.session_state["_cv_from_review_plan"] = True
+                            if not CV_TEMPLATE_DOCX.is_file():
+                                st.session_state.pop("_docx_bytes", None)
+                                st.error(f"Template missing: {CV_TEMPLATE_DOCX}")
+                            else:
+                                fd, out_path = tempfile.mkstemp(suffix=".docx")
+                                os.close(fd)
+                                try:
+                                    context = cv_context_from_structured(new_cv_data)
+                                    render_cv(str(CV_TEMPLATE_DOCX), out_path, context)
+                                    st.session_state["_docx_bytes"] = Path(out_path).read_bytes()
+                                except Exception as exc:
+                                    st.session_state.pop("_docx_bytes", None)
+                                    st.error(f"DOCX render failed: {exc}")
+                                finally:
+                                    Path(out_path).unlink(missing_ok=True)
+                            st.success(
+                                "CV assembled from the review's exact wording where provided. "
+                                "Preview and DOCX download are in the section below."
+                            )
+
+                st.caption(
+                    "Optimisation uses only the extracted resume text from your PDF (not a stock sample CV). "
+                    "Open the resume preview expander first — if it is empty or garbled, re-export the PDF as text before optimising. "
+                    f"DOCX export uses {CV_TEMPLATE_DOCX.name} (generic optimiser + master template)."
+                )
+                opt_col1, opt_col2 = st.columns(2)
+                with opt_col1:
+                    if st.button(
+                        "Optimize Resume to 75%+ ATS Score",
+                        use_container_width=True,
+                        icon=":material/auto_awesome:",
+                    ):
+                        ph = st.empty()
+                        ph.markdown(SKELETON_HTML, unsafe_allow_html=True)
+                        with st.spinner("Running generic CV optimiser (Groq)…"):
+                            result = optimize_cv_generic(
+                                resume_text,
+                                job_description,
+                                missing_kw,
+                                max_score_target=75,
+                            )
+                        ph.empty()
+                        if result.get("rate_limited"):
+                            pass
+                        elif result.get("error"):
+                            st.error(result["error"])
+                        else:
+                            st.session_state["optimized_data"] = result
+                            st.session_state.pop("_cv_from_review_plan", None)
+                            st.session_state.pop("_hm_feedback_cache_key", None)
+                            if not CV_TEMPLATE_DOCX.is_file():
+                                st.session_state.pop("_docx_bytes", None)
+                                st.error(f"Template missing: {CV_TEMPLATE_DOCX}")
+                            else:
+                                fd, out_path = tempfile.mkstemp(suffix=".docx")
+                                os.close(fd)
+                                try:
+                                    context = cv_context_from_structured(result)
+                                    render_cv(str(CV_TEMPLATE_DOCX), out_path, context)
+                                    st.session_state["_docx_bytes"] = Path(out_path).read_bytes()
+                                except Exception as exc:
+                                    st.session_state.pop("_docx_bytes", None)
+                                    st.error(f"DOCX render failed: {exc}")
+                                finally:
+                                    Path(out_path).unlink(missing_ok=True)
+                            done_msg = (
+                                "Optimisation complete — generic optimiser + master template. "
+                                "Download DOCX below."
+                            )
+                            ach = result.get("_ats_score_achieved")
+                            if isinstance(ach, int):
+                                done_msg += f" Estimated whitelist overlap after this pass: {ach}%."
+                            st.success(done_msg)
+                with opt_col2:
+                    if st.button(
+                        "Reset optimised CV",
+                        use_container_width=True,
+                        help="Clears cached structured CV and DOCX so the next optimise starts fresh.",
+                    ):
+                        st.session_state.pop("optimized_data", None)
+                        st.session_state.pop("_docx_bytes", None)
+                        st.session_state.pop("_cv_from_review_plan", None)
+                        st.session_state.pop("_hm_feedback_cache_key", None)
+                        st.session_state.pop("manager_comment", None)
+                        st.rerun()
+
+                od = st.session_state.get("optimized_data")
+                if isinstance(od, dict) and not od.get("error"):
+                    data = od
+                    with st.expander("Preview optimised data", expanded=False):
+                        st.json(data)
+
+                    col_docx, col_info = st.columns(2)
+                    with col_docx:
+                        if st.button("📄 Prepare DOCX download", use_container_width=True):
+                            if not CV_TEMPLATE_DOCX.is_file():
+                                st.error(f"Template missing: {CV_TEMPLATE_DOCX}")
+                            else:
+                                context = cv_context_from_structured(data)
+                                fd, out_path = tempfile.mkstemp(suffix=".docx")
+                                os.close(fd)
+                                try:
+                                    render_cv(str(CV_TEMPLATE_DOCX), out_path, context)
+                                    st.session_state["_docx_bytes"] = Path(out_path).read_bytes()
+                                except Exception as exc:
+                                    st.session_state.pop("_docx_bytes", None)
+                                    st.error(f"DOCX render failed: {exc}")
+                                finally:
+                                    Path(out_path).unlink(missing_ok=True)
+                        docx_bytes = st.session_state.get("_docx_bytes")
+                        if docx_bytes:
+                            safe_name = re.sub(
+                                r"[^\w\-]+",
+                                "_",
+                                (data.get("name") or "CV").strip(),
+                            ).strip("_")[:80] or "CV"
+                            suffix = "_CV_Improved.docx" if st.session_state.get("_cv_from_review_plan") else "_CV.docx"
+                            st.download_button(
+                                label="Download DOCX",
+                                data=docx_bytes,
+                                file_name=f"{safe_name}{suffix}",
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True,
+                                key="dl_docx_optimised",
+                            )
+                    with col_info:
+                        st.info(
+                            "PDF export: open the DOCX in Word and use Save as PDF, or use an online converter. "
+                            "Direct PDF export from this screen may be added later."
+                        )
+
+            elif uploaded is not None and not job_description.strip():
+                st.session_state["_ui_match_pct"] = None
+                st.session_state["_ui_word_count"] = None
+                st.session_state["_ui_job_kw_count"] = None
+                st.info("Add a job description on the left to unlock ATS scoring and AI tools.")
+            elif job_description.strip() and uploaded is None:
+                st.session_state["_ui_word_count"] = None
+                st.session_state["_ui_match_pct"] = None
+                st.session_state["_ui_job_kw_count"] = None
+                st.info("Upload your resume PDF on the left to continue.")
+            else:
+                st.session_state["_ui_word_count"] = None
+                st.session_state["_ui_match_pct"] = None
+                st.session_state["_ui_job_kw_count"] = None
+                st.markdown(
+                    """
+                    **:material/rocket_launch: Get started** — upload a PDF and paste a job description to unlock:
+
+                    - Whitelist ATS overlap score
+                    - Matched / missing skill chips
+                    - Groq-powered feedback, interview questions, improvement plan, and optimised DOCX export
+                    """
+                )
+
+
+if __name__ == "__main__":
+    main()
