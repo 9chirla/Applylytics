@@ -54,9 +54,10 @@ def _check_auth() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     try:
-        from utils.cv_optimizer import reset_groq_client
+        from utils.cv_optimizer import reset_gemini_client, reset_groq_client
 
         reset_groq_client()
+        reset_gemini_client()
     except ImportError:
         pass
     st.set_page_config(

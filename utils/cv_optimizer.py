@@ -65,18 +65,23 @@ def get_groq_client() -> OpenAI:
     return _GROQ_CLIENT
 
 
+def reset_gemini_client() -> None:
+    """Drop cached Gemini client (e.g. after rotating keys or loading Streamlit secrets)."""
+    global _GEMINI_CLIENT
+    _GEMINI_CLIENT = None
+
+
 def get_gemini_client() -> OpenAI | None:
     """OpenAI-compatible client for Google Gemini, or None if GEMINI_API_KEY is unset."""
     global _GEMINI_CLIENT
-    key = (os.getenv("GEMINI_API_KEY") or "").strip()
-    if not key:
-        try:
-            from applylytics.config import settings
+    try:
+        from applylytics.config import resolve_gemini_api_key
 
-            key = (settings.gemini_api_key or "").strip()
-        except Exception:
-            pass
+        key = resolve_gemini_api_key()
+    except ImportError:
+        key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not key:
+        _GEMINI_CLIENT = None
         return None
     if _GEMINI_CLIENT is None:
         _GEMINI_CLIENT = OpenAI(
@@ -261,7 +266,7 @@ def safe_groq_chat_create(
     **kwargs: Any,
 ) -> tuple[Any, str | None]:
     """
-    Call Groq chat completions; on rate limit, retry once with fallback_client if set.
+    Call Groq chat completions; on rate limit or payload errors, retry with Gemini if configured.
 
     Raises applylytics.llm.client.RateLimitError when both providers are rate limited.
     """
@@ -269,12 +274,39 @@ def safe_groq_chat_create(
     from applylytics.llm.client import groq_quota_user_message
 
     model = kwargs.get("model", "?")
-    can_fallback = fallback_client is not None and bool(fallback_model)
+    fb_client = fallback_client or get_gemini_client()
+    fb_model = fallback_model or (get_gemini_model() if fb_client else None)
+    can_fallback = fb_client is not None and bool(fb_model)
+
+    def _gemini_fallback(reason: str, attempt_kwargs: dict[str, Any]) -> tuple[Any, str | None]:
+        if not can_fallback:
+            return None, reason
+        logger.warning("Groq failed (%s); falling back to Gemini", reason)
+        return _gemini_fallback_chat(fb_client, fb_model, attempt_kwargs)
 
     def _rate_limit_fallback(exc: BaseException) -> tuple[Any, str | None]:
         if not can_fallback:
             raise LLMRateLimitError(groq_quota_user_message(exc)) from exc
-        return _gemini_fallback_chat(fallback_client, fallback_model, kwargs)
+        return _gemini_fallback_chat(fb_client, fb_model, kwargs)
+
+    def _payload_fallback() -> tuple[Any, str | None]:
+        shrunk = dict(kwargs)
+        if shrunk.get("messages"):
+            shrunk["messages"] = _shrink_messages_for_groq(shrunk["messages"])
+        shrunk["max_tokens"] = min(int(shrunk.get("max_tokens", 4096)), 3072)
+        try:
+            response = client.chat.completions.create(**shrunk)
+            logger.info("LLM chat completion via provider=groq model=%s (truncated retry)", model)
+            return response, None
+        except APIError as exc2:
+            status2 = getattr(exc2, "status_code", None)
+            if _http_status_429(exc2):
+                return _rate_limit_fallback(exc2)
+            if status2 == 413 or str(status2) == "413":
+                return _gemini_fallback("413 payload too large", shrunk)
+            return _gemini_fallback(f"payload error ({status2})", shrunk)
+        except OpenAIRateLimitError as exc2:
+            return _rate_limit_fallback(exc2)
 
     try:
         response = client.chat.completions.create(**kwargs)
@@ -289,10 +321,15 @@ def safe_groq_chat_create(
         if _http_status_429(exc):
             return _rate_limit_fallback(exc)
         if status == 413 or str(status) == "413":
+            response, err = _payload_fallback()
+            if response is not None:
+                return response, None
+            if err:
+                return None, err
             return None, (
                 "Groq API error (413): Request payload too large. "
-                "Resume or job description was trimmed automatically on retry; "
-                "if this persists, use a shorter PDF or job posting."
+                "Add GEMINI_API_KEY in Secrets for automatic Gemini fallback, "
+                "or use a shorter resume / job description."
             )
         return None, f"Groq API error ({getattr(exc, 'status_code', '?')}): {exc}"
 
@@ -643,7 +680,7 @@ def _fetch_chat_completion(
         response, err = _call(kwargs)
         if err is None:
             return response, None
-        if "413" in err and kwargs["messages"]:
+        if "413" in (err or "") and kwargs.get("messages"):
             logger.warning("Groq 413 payload too large — retrying with truncated messages")
             retry_kwargs = dict(kwargs)
             retry_kwargs["messages"] = _shrink_messages_for_groq(kwargs["messages"])
@@ -651,6 +688,17 @@ def _fetch_chat_completion(
             response, err = _call(retry_kwargs)
             if err is None:
                 return response, None
+            if fallback_client is not None:
+                logger.warning("Groq 413 after truncate — trying Gemini fallback")
+                gemini_resp, gemini_err = _gemini_fallback_chat(
+                    fallback_client,
+                    fallback_model,
+                    retry_kwargs,
+                )
+                if gemini_resp is not None:
+                    return gemini_resp, None
+                if gemini_err:
+                    return None, gemini_err
         if json_mode:
             plain_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
             response, err = _call(plain_kwargs)

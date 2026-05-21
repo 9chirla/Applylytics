@@ -128,6 +128,18 @@ def resolve_groq_api_key() -> str:
     return ""
 
 
+def resolve_gemini_api_key() -> str:
+    """Return Gemini API key from secrets, env, or .env (refreshed each call)."""
+    sync_streamlit_secrets_to_environ()
+    current = load_settings()
+    key = (current.gemini_api_key or "").strip()
+    if not key:
+        key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if key and not _is_placeholder_key(key):
+        return key
+    return ""
+
+
 def api_key_help_message() -> str:
     return _API_KEY_HELP
 
