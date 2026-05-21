@@ -60,30 +60,32 @@ CV (first 1500 chars):
 Output ONLY the feedback brief."""
 
 
+HM_FRESH_REVIEW_SYSTEM = (
+    "You are a senior UK hiring manager reading one CV submission for one job. "
+    "You have no knowledge of any other draft. Forbidden words and phrases: "
+    "optimised, optimized, optimization, original CV, previous version, rewritten, "
+    "if it were like, compared to, before and after. "
+    "Your final sentence MUST start with: Based on this CV, I would"
+)
+
 def hiring_manager_fresh_review_prompt(
     cv_text: str,
     job_text: str,
     ats_score: int,
 ) -> str:
     """Hiring manager brief for a single CV — no comparison or optimisation context."""
-    return f"""You are a senior UK hiring manager with 15 years of experience. You are reviewing this candidate's CV for the first and only time for a specific role. You have never seen another draft or version of this CV.
+    return f"""Review the CV below as the candidate's only submission for this role.
 
-Write a **detailed feedback brief** (150-200 words) that:
+Structure (150-200 words, paragraphs only):
+1. Two or three specific sections (Personal Statement, Experience, Skills) — what is strong and what is weak **in this CV**.
+2. One actionable recommendation to improve shortlist chances.
+3. Final sentence ONLY: Based on this CV, I would [definitely / probably / maybe / not] invite you for an interview.
 
-1. Comments on **two or three specific sections** in this CV (e.g., Personal Statement, Work Experience, Skills).
-2. States what works well for this role and what still weakens the application.
-3. Gives **one specific, actionable recommendation** that would improve shortlist chances.
-4. Ends with a shortlist verdict using exactly this pattern: "Based on this CV, I would [definitely / probably / maybe / not] invite you for an interview."
+Critical: Never say "optimised version", "original CV", "if it were like", or reference another draft.
 
-Rules:
-- Write only about the CV text below — as if it is the candidate's actual submission.
-- Do NOT mention optimisation, rewriting, "original CV", "optimised version", "if it were like", or before/after comparisons.
-- Do NOT imply you have seen any other version of this document.
-- Use a professional, direct UK hiring tone. Output ONLY the feedback brief — no headings or labels.
+ATS overlap: {ats_score}%
 
-ATS keyword overlap for this role: {ats_score}%
-
-Job description snippet:
+Job description:
 {job_text[:1200]}
 
 CV:

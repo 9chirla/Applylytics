@@ -315,6 +315,28 @@ def _fetch_original_hiring_manager_comment(
     return comment
 
 
+def _optimised_hm_cache_key(
+    resume_text: str,
+    job_description: str,
+    optimised_cv_text: str,
+) -> str:
+    phase_key = _phase_key(resume_text, job_description)
+    fp = hashlib.sha256(optimised_cv_text.encode()).hexdigest()[:20]
+    return f"{phase_key}:optimised:{fp}:fresh_v3"
+
+
+def _cached_optimised_hm_comment_valid(hm_key: str, comment: str | None) -> bool:
+    if not comment or not str(comment).strip():
+        return False
+    if st.session_state.get("_optimised_hm_cache_key") != hm_key:
+        return False
+    from applylytics.llm.coach import _fresh_hm_looks_like_comparison
+
+    if _fresh_hm_looks_like_comparison(str(comment)):
+        return False
+    return True
+
+
 def _fetch_optimised_hiring_manager_comment(
     resume_text: str,
     job_description: str,
@@ -322,12 +344,10 @@ def _fetch_optimised_hiring_manager_comment(
     optimised_cv_text: str,
 ) -> str | None:
     """Hiring manager feedback on the optimised CV only (no before/after comparison)."""
-    phase_key = _phase_key(resume_text, job_description)
-    fp = hashlib.sha256(optimised_cv_text.encode()).hexdigest()[:20]
-    hm_key = f"{phase_key}:optimised:{fp}:fresh_v2"
+    hm_key = _optimised_hm_cache_key(resume_text, job_description, optimised_cv_text)
 
     cached = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
-    if st.session_state.get("_optimised_hm_cache_key") == hm_key and cached:
+    if _cached_optimised_hm_comment_valid(hm_key, cached):
         return cached
 
     try:
@@ -398,8 +418,11 @@ def render_optimised_cv_results(
 
     emit_html('<p class="al-results-label" style="margin-top:1.5rem;">Hiring manager · optimised CV</p>')
     opt_cv_text = render_cv_to_text(od).strip()
+    hm_key = _optimised_hm_cache_key(resume_text, job_description, opt_cv_text)
     comment = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
-    if not comment or not str(comment).strip():
+    if not _cached_optimised_hm_comment_valid(hm_key, comment):
+        st.session_state.pop(SessionKey.OPTIMISED_MANAGER_COMMENT, None)
+        comment = None
         if not opt_cv_text:
             st.info("Optimised CV text is not ready yet — try optimising again.")
         else:
