@@ -118,6 +118,7 @@ def _sync_input_signature(has_resume: bool, job_description: str) -> None:
         SessionKey.MANAGER_COMMENT,
         SessionKey.OPTIMISED_MANAGER_COMMENT,
         SessionKey.HM_FEEDBACK_CACHE_KEY,
+        "_optimised_hm_fetch_failed",
     ):
         st.session_state.pop(key, None)
 
@@ -341,10 +342,13 @@ def _fetch_optimised_hiring_manager_comment(
         st.warning(RATE_LIMIT_WARNING)
         return None
     if comment is None:
+        st.session_state["_optimised_hm_fetch_failed"] = True
         return None
     if comment.startswith("Groq API error"):
         st.error(comment)
+        st.session_state["_optimised_hm_fetch_failed"] = True
         return None
+    st.session_state.pop("_optimised_hm_fetch_failed", None)
     st.session_state[SessionKey.OPTIMISED_MANAGER_COMMENT] = comment
     st.session_state["_optimised_hm_cache_key"] = hm_key
     return comment
@@ -392,19 +396,26 @@ def render_optimised_cv_results(
     if insight:
         render_insight(str(insight))
 
+    emit_html('<p class="al-results-label" style="margin-top:1.5rem;">Hiring manager · optimised CV</p>')
     opt_cv_text = render_cv_to_text(od).strip()
     comment = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
     if not comment or not str(comment).strip():
-        comment = _fetch_optimised_hiring_manager_comment(
-            resume_text,
-            job_description,
-            opt_score,
-            opt_cv_text,
+        if not opt_cv_text:
+            st.info("Optimised CV text is not ready yet — try optimising again.")
+        else:
+            comment = _fetch_optimised_hiring_manager_comment(
+                resume_text,
+                job_description,
+                opt_score,
+                opt_cv_text,
+            )
+    if comment and str(comment).strip():
+        render_hiring_manager_comment(
+            comment,
+            label="Optimised CV · hiring manager view",
         )
-    render_hiring_manager_comment(
-        comment,
-        label="Optimised CV · hiring manager view",
-    )
+    elif not st.session_state.get("_optimised_hm_fetch_failed"):
+        st.caption("Hiring manager feedback will appear here after the AI response completes.")
 
 
 def render_ai_coach_panel(
@@ -514,6 +525,7 @@ def render_optimiser_panel(
             st.session_state.pop(SessionKey.HM_FEEDBACK_CACHE_KEY, None)
             st.session_state.pop(SessionKey.OPTIMISED_MANAGER_COMMENT, None)
             st.session_state.pop("_optimised_hm_cache_key", None)
+            st.session_state.pop("_optimised_hm_fetch_failed", None)
             with st.spinner("Scoring optimised CV…"):
                 opt_ats = _score_optimised_cv(result, job_description)
             st.session_state[SessionKey.OPTIMISED_ATS_RESULT] = opt_ats
@@ -544,6 +556,7 @@ def render_optimiser_panel(
                 SessionKey.MANAGER_COMMENT,
                 SessionKey.OPTIMISED_MANAGER_COMMENT,
                 "_optimised_hm_cache_key",
+                "_optimised_hm_fetch_failed",
                 SessionKey.ATS_RESULT,
             ):
                 st.session_state.pop(key, None)
