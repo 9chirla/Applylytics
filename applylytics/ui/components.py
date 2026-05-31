@@ -42,7 +42,10 @@ def emit_html(markup: str) -> None:
     st.markdown(_dedent_html(markup), unsafe_allow_html=True)
 
 
-def render_top_bar(portfolio_url: str, docs_url: str = "https://github.com") -> None:
+def render_top_bar(
+    portfolio_url: str,
+    docs_url: str = "https://github.com/9chirla",
+) -> None:
     """Logo and nav links."""
     emit_html(f"""
     <div class="al-topbar">
@@ -141,7 +144,7 @@ def render_hero_section(step_status: dict[str, bool]) -> str:
           <div class="al-step-line"></div>
           <div class="al-step {s2}">
             <div class="al-step-num">{num(jd, upload and not jd, 2)}</div>
-            Add JD
+            Role details
           </div>
           <div class="al-step-line"></div>
           <div class="al-step {s3}">
@@ -220,22 +223,43 @@ def render_score_ring(score: int) -> str:
 
 
 def render_score_panel(ats_result: dict[str, Any]) -> None:
-    """Horizontal score panel: ring + metadata + bar."""
-    score = int(ats_result.get("score", 0))
+    """Horizontal score panel: keyword ring + optional semantic score."""
+    keyword_score = int(ats_result.get("keyword_score", ats_result.get("score", 0)))
+    semantic_raw = ats_result.get("semantic_score")
     matched = ats_result.get("matched_keywords") or []
     job_kw = int(ats_result.get("job_keyword_count", 0) or len(matched))
-    title = score_match_title(score)
-    desc = score_match_description(score, len(matched), job_kw)
-    ring = render_score_ring(score)
+    title = score_match_title(keyword_score)
+    desc = score_match_description(keyword_score, len(matched), job_kw)
+    kw_hint = str(
+        ats_result.get("keyword_insight")
+        or "Whitelist skill phrases in the job posting that also appear in your CV."
+    )
+    ring = render_score_ring(keyword_score)
+    semantic_block = ""
+    if semantic_raw is not None:
+        sem = int(semantic_raw)
+        sem_hint = str(
+            ats_result.get("semantic_insight")
+            or "Overall topical similarity between your CV and the job description (embeddings)."
+        )
+        semantic_block = f"""
+        <div class="al-score-semantic">
+          <p class="al-score-semantic-label">Semantic similarity</p>
+          <p class="al-score-semantic-value">{sem}<span class="al-ring-pct">%</span></p>
+          <p class="al-score-semantic-desc">{html.escape(sem_hint)}</p>
+        </div>
+        """
     emit_html(f"""
     <div class="al-score-panel">
       {ring}
       <div class="al-score-meta">
         <p class="al-score-title">{html.escape(title)}</p>
         <p class="al-score-desc">{html.escape(desc)}</p>
+        <p class="al-score-hint">{html.escape(kw_hint)}</p>
         <div class="al-score-bar-track">
-          <div class="al-score-bar-fill" style="width:{score}%;"></div>
+          <div class="al-score-bar-fill" style="width:{keyword_score}%;"></div>
         </div>
+        {semantic_block}
       </div>
     </div>
     """)
@@ -334,6 +358,42 @@ def render_results_label() -> None:
 
 def render_field_label(text: str) -> None:
     emit_html(f'<p class="al-field-label">{html.escape(text)}</p>')
+
+
+def render_field_sublabel(text: str) -> None:
+    """Secondary label inside a field group (left-aligned within the form column)."""
+    emit_html(f'<p class="al-field-sublabel">{html.escape(text)}</p>')
+
+
+def render_role_target_card_marker() -> None:
+    """Marker for CSS — pairs with st.container(border=True) around role fields."""
+    emit_html('<div class="al-role-card-marker" aria-hidden="true"></div>')
+
+
+def render_target_application_banner(
+    *,
+    company: str = "",
+    role_title: str = "",
+) -> None:
+    """Show who this CV run is for (company from Step 2, role from JD parse)."""
+    company = (company or "").strip()
+    role_title = (role_title or "").strip()
+    if not company and not role_title:
+        return
+    parts: list[str] = []
+    if company:
+        parts.append(f'<span class="al-target-chip al-target-chip-co">{html.escape(company)}</span>')
+    if role_title and role_title not in ("this role", "your target role"):
+        parts.append(f'<span class="al-target-chip al-target-chip-role">{html.escape(role_title)}</span>')
+    if not parts:
+        return
+    chips = "".join(parts)
+    emit_html(f"""
+    <div class="al-target-banner">
+      <span class="al-target-banner-label">Applying to</span>
+      <div class="al-target-banner-chips">{chips}</div>
+    </div>
+    """)
 
 
 def render_action_buttons_marker() -> None:

@@ -58,6 +58,7 @@ html, body, .stApp {
   margin: 0 !important;
   padding: 0 !important;
   width: 100% !important;
+  position: relative;
 }
 
 .al-snap-section {
@@ -181,6 +182,7 @@ section[data-testid="stMain"] > div {
   overflow: hidden;
   min-height: calc(100vh - 52px);
   height: 100%;
+  z-index: 2;
 }
 
 .al-hero-image img {
@@ -439,11 +441,156 @@ section[data-testid="stMain"] > div {
 
 [data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stFileUploader"],
 [data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextArea"],
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextInput"],
 [data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stButton"] {
   max-width: 560px !important;
   width: 100% !important;
   margin-left: auto !important;
   margin-right: auto !important;
+}
+
+/* In-card section title (inside bordered container only) */
+[data-testid="stVerticalBlockBorderWrapper"] .al-field-group-title {
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  color: var(--text-secondary) !important;
+  margin: 0 0 14px 0 !important;
+  padding: 0 !important;
+  text-align: left !important;
+}
+
+/* Stack label above field (not beside) */
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextArea"],
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextInput"],
+[data-testid="stVerticalBlock"]:has(.al-snap-results) [data-testid="stTextInput"] {
+  flex-direction: column !important;
+  align-items: stretch !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextArea"] > div,
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextInput"] > div,
+[data-testid="stVerticalBlock"]:has(.al-snap-results) [data-testid="stTextInput"] > div {
+  flex-direction: column !important;
+  align-items: stretch !important;
+  width: 100% !important;
+}
+
+/* Widget labels (attached to inputs — stay aligned with fields) */
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextArea"] label,
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextInput"] label,
+[data-testid="stVerticalBlock"]:has(.al-snap-results) [data-testid="stTextInput"] label,
+[data-testid="stWidgetLabel"] {
+  display: block !important;
+  width: 100% !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  color: var(--text-secondary) !important;
+  margin: 0 0 8px 0 !important;
+  padding: 0 !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextArea"] label p,
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stTextInput"] label p,
+[data-testid="stVerticalBlock"]:has(.al-snap-results) [data-testid="stTextInput"] label p {
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  color: var(--text-secondary) !important;
+}
+
+.al-role-card-marker,
+.al-delivery-card-marker {
+  display: none !important;
+  height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Bordered field groups (Target role, Email delivery) */
+[data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stVerticalBlockBorderWrapper"]:has(.al-role-card-marker),
+[data-testid="stVerticalBlock"]:has(.al-snap-results) [data-testid="stVerticalBlockBorderWrapper"]:has(.al-delivery-card-marker) {
+  max-width: 560px !important;
+  width: 100% !important;
+  margin: 0 auto 20px auto !important;
+  padding: 18px 20px 10px 20px !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stVerticalBlock"]:has(.al-snap-results) [data-testid="stVerticalBlockBorderWrapper"]:has(.al-delivery-card-marker) {
+  max-width: 680px !important;
+}
+
+[data-testid="stVerticalBlockBorderWrapper"]:has(.al-role-card-marker) [data-testid="stTextArea"],
+[data-testid="stVerticalBlockBorderWrapper"]:has(.al-role-card-marker) [data-testid="stTextInput"],
+[data-testid="stVerticalBlockBorderWrapper"]:has(.al-delivery-card-marker) [data-testid="stTextInput"] {
+  max-width: 100% !important;
+  width: 100% !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  margin-bottom: 16px !important;
+}
+
+[data-testid="stVerticalBlockBorderWrapper"]:has(.al-role-card-marker) [data-testid="stTextInput"]:last-child,
+[data-testid="stVerticalBlockBorderWrapper"]:has(.al-delivery-card-marker) [data-testid="stTextInput"]:last-child {
+  margin-bottom: 4px !important;
+}
+
+.al-target-banner {
+  max-width: 680px;
+  margin: 0 auto 20px auto;
+  padding: 14px 18px;
+  background: var(--accent-light);
+  border: 1px solid rgba(79, 70, 229, 0.2);
+  border-radius: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  box-sizing: border-box;
+}
+
+.al-target-banner-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.al-target-banner-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.al-target-chip {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.al-target-chip-co {
+  background: var(--surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+}
+
+.al-target-chip-role {
+  background: var(--accent);
+  color: #fff;
 }
 
 [data-testid="stVerticalBlock"]:has(.al-snap-input) [data-testid="stButton"] {
@@ -629,19 +776,74 @@ section[data-testid="stMain"] > div {
   padding: 0 !important;
 }
 
+/* Text inputs — professional, consistent (not pill / not harsh black) */
+[data-testid="stTextInput"] {
+  background: transparent !important;
+}
+
+[data-testid="stTextInput"] > div,
+[data-testid="stTextInput"] [data-baseweb="input"],
+[data-testid="stTextInput"] > div > div {
+  background: transparent !important;
+  border: none !important;
+  border-radius: var(--radius-md) !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stTextInput"] input {
+  border: 1.5px solid var(--border-strong) !important;
+  outline: none !important;
+  border-radius: var(--radius-md) !important;
+  background: var(--surface-muted) !important;
+  font-family: 'Outfit', system-ui, sans-serif !important;
+  font-size: 14px !important;
+  line-height: 1.45 !important;
+  color: var(--text-primary) !important;
+  padding: 11px 14px !important;
+  min-height: 44px !important;
+  box-shadow: none !important;
+}
+
+[data-testid="stTextInput"] input::placeholder {
+  color: var(--text-tertiary) !important;
+  opacity: 1 !important;
+}
+
+[data-testid="stTextInput"] input:focus {
+  border-color: var(--accent) !important;
+  background: var(--surface) !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12) !important;
+}
+
 /* Text area */
+[data-testid="stTextArea"] > div {
+  background: transparent !important;
+  border: none !important;
+}
+
 [data-testid="stTextArea"] textarea {
   border: 1.5px solid var(--border-strong) !important;
   outline: none !important;
   border-radius: var(--radius-md) !important;
   background: var(--surface-muted) !important;
-  font-family: 'Outfit', sans-serif !important;
-  font-size: 13px !important;
+  font-family: 'Outfit', system-ui, sans-serif !important;
+  font-size: 14px !important;
+  line-height: 1.55 !important;
   color: var(--text-primary) !important;
-  min-height: 130px !important;
+  padding: 12px 14px !important;
+  min-height: 140px !important;
+  resize: vertical !important;
+  box-shadow: none !important;
 }
+
+[data-testid="stTextArea"] textarea::placeholder {
+  color: var(--text-tertiary) !important;
+  opacity: 1 !important;
+}
+
 [data-testid="stTextArea"] textarea:focus {
   border-color: var(--accent) !important;
+  background: var(--surface) !important;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12) !important;
 }
 
@@ -675,14 +877,14 @@ button[data-testid="stBaseButton-primary"]:not([data-key="btn_optimise_cv"]):not
   font-weight: 600 !important;
 }
 
-/* Remove bordered container chrome */
-[data-testid="stVerticalBlockBorderWrapper"] {
+/* Default bordered containers — hide unless marked as field group */
+[data-testid="stVerticalBlockBorderWrapper"]:not(:has(.al-role-card-marker)):not(:has(.al-delivery-card-marker)) {
   background: transparent !important;
   border: none !important;
   padding: 0 !important;
   box-shadow: none !important;
 }
-[data-testid="stVerticalBlockBorderWrapper"]:hover {
+[data-testid="stVerticalBlockBorderWrapper"]:not(:has(.al-role-card-marker)):not(:has(.al-delivery-card-marker)):hover {
   transform: none !important;
   box-shadow: none !important;
 }
@@ -697,6 +899,32 @@ button[data-testid="stBaseButton-primary"]:not([data-key="btn_optimise_cv"]):not
   border-radius: var(--radius-lg);
   border: 1px solid var(--border);
   margin-bottom: 1.5rem;
+}
+.al-score-hint,
+.al-score-semantic-desc {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin: 0.35rem 0 0;
+  line-height: 1.45;
+}
+.al-score-semantic {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.al-score-semantic-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+.al-score-semantic-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0.15rem 0;
 }
 .al-ring-wrap {
   position: relative;
