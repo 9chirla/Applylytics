@@ -9,6 +9,7 @@ import pytest
 from openai import RateLimitError as OpenAIRateLimitError
 
 from applylytics.llm.client import (
+    ApplylyticsLLMError,
     RateLimitError,
     is_groq_rate_limit_error,
     parse_json_from_ai,
@@ -36,27 +37,60 @@ def test_is_groq_rate_limit_error_exception_type():
     assert is_groq_rate_limit_error(RateLimitError("quota")) is True
 
 
-def test_safe_groq_chat_create_raises_rate_limit_error():
+def test_safe_groq_chat_create_raises_applylytics_llm_error():
     client = MagicMock()
     client.chat.completions.create.side_effect = OpenAIRateLimitError(
         "rate limit",
         response=MagicMock(status_code=429),
         body=None,
     )
-    with pytest.raises(RateLimitError):
+    with pytest.raises(ApplylyticsLLMError):
         safe_groq_chat_create(client, model="llama-3.3-70b-versatile", messages=[])
 
 
-def test_ui_handler_catches_rate_limit_error():
-    """Simulate panel pattern: catch RateLimitError and surface warning flag."""
+def test_safe_groq_retries_fast_model_on_429(monkeypatch):
+    """When the primary model is TPM-limited, retry with GROQ_FAST_MODEL."""
+    from applylytics.llm import groq_optimizer
+
+    monkeypatch.setattr(groq_optimizer, "get_gemini_client", lambda: None)
+    client = MagicMock()
+    ok_response = MagicMock()
+    rate_exc = OpenAIRateLimitError(
+        "rate limit",
+        response=MagicMock(status_code=429),
+        body=None,
+    )
+
+    def _create(**kwargs):
+        if kwargs.get("model") == "llama-3.1-8b-instant":
+            return ok_response
+        raise rate_exc
+
+    client.chat.completions.create.side_effect = _create
+    resp, err = groq_optimizer.safe_groq_chat_create(
+        client,
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=4096,
+    )
+    assert err is None
+    assert resp is ok_response
+    models_used = [
+        c.kwargs.get("model") for c in client.chat.completions.create.call_args_list
+    ]
+    assert "llama-3.1-8b-instant" in models_used
+
+
+def test_ui_handler_catches_applylytics_llm_error():
+    """Simulate panel pattern: catch ApplylyticsLLMError and surface warning flag."""
 
     def panel_action() -> str:
-        raise RateLimitError("quota")
+        raise ApplylyticsLLMError("quota")
 
     warning_shown = False
     try:
         panel_action()
-    except RateLimitError:
+    except ApplylyticsLLMError:
         warning_shown = True
 
     assert warning_shown

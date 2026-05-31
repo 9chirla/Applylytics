@@ -1,4 +1,4 @@
-"""Groq API client helpers and safe chat completion wrapper."""
+"""Groq/Gemini API client helpers, retries, and safe chat completion wrapper."""
 
 from __future__ import annotations
 
@@ -6,7 +6,13 @@ import json
 import logging
 from typing import Any
 
-from openai import APIError, OpenAI, RateLimitError as OpenAIRateLimitError
+from openai import APIConnectionError, APIError, OpenAI, RateLimitError as OpenAIRateLimitError
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from applylytics.config import api_key_help_message, resolve_groq_api_key, settings
 
@@ -14,7 +20,16 @@ logger = logging.getLogger("applylytics")
 
 
 class RateLimitError(Exception):
-    """Raised when Groq returns rate-limit or quota errors."""
+    """Raised when Groq returns rate-limit or quota errors (legacy)."""
+
+
+class ApplylyticsLLMError(Exception):
+    """User-facing LLM failure after retries and fallbacks are exhausted."""
+
+    def __init__(self, message: str, *, cause: BaseException | None = None) -> None:
+        super().__init__(message)
+        self.user_message = message
+        self.cause = cause
 
 
 def _groq_rate_limit_message_text(msg: str) -> bool:
@@ -40,16 +55,25 @@ def groq_quota_user_message(exc: BaseException) -> str:
                     detail = str(err["message"])
         except Exception:
             pass
+    import re
+
+    wait_hint = ""
+    m = re.search(r"try again in ([\d.]+)s", detail, re.IGNORECASE)
+    if m:
+        wait_hint = f" Groq suggests waiting about {float(m.group(1)):.0f} seconds."
+
     hint = (
-        "Groq applies token and request limits per organization. "
-        "Wait for the window to reset, upgrade billing, or use a smaller model (e.g. llama-3.1-8b-instant)."
+        "We retried the request several times with backoff. "
+        "Set GROQ_MODEL=llama-3.1-8b-instant in .env, wait for the minute window to reset, "
+        "or add a valid GEMINI_API_KEY for fallback. Restart Streamlit after editing .env."
+        f"{wait_hint}"
     )
     return f"{detail}\n\n{hint}"
 
 
 def is_groq_rate_limit_error(obj: Any) -> bool:
-    """True for RateLimitError instances or legacy rate-limit payloads."""
-    if isinstance(obj, RateLimitError):
+    """True for RateLimitError / ApplylyticsLLMError instances or legacy rate-limit payloads."""
+    if isinstance(obj, (RateLimitError, ApplylyticsLLMError)):
         return True
     if isinstance(obj, dict):
         if obj.get("rate_limited"):
@@ -83,25 +107,47 @@ def require_groq_api_key() -> str | None:
 
 
 def get_groq_client() -> OpenAI:
-    """OpenAI-compatible client pointed at Groq."""
-    return OpenAI(api_key=groq_api_key(), base_url="https://api.groq.com/openai/v1")
+    """OpenAI-compatible client pointed at Groq (SDK retries disabled; we use tenacity)."""
+    return OpenAI(
+        api_key=groq_api_key(),
+        base_url="https://api.groq.com/openai/v1",
+        max_retries=0,
+        timeout=120.0,
+    )
+
+
+@retry(
+    retry=retry_if_exception_type((OpenAIRateLimitError, APIConnectionError)),
+    wait=wait_exponential(multiplier=1, min=1, max=32),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+def retryable_chat_create(client: OpenAI, **kwargs: Any) -> Any:
+    """Groq/Gemini chat completion with exponential backoff (4 attempts)."""
+    return client.chat.completions.create(**kwargs)
 
 
 def safe_groq_chat_create(client: OpenAI, **kwargs: Any) -> tuple[Any, str | None]:
     """
-    Call Groq chat completions.
+    Call Groq chat completions with retries.
 
     Returns (response, None) on success, (None, error_message) on non-rate API errors.
-    Raises RateLimitError on quota / 429 responses.
+    Raises ApplylyticsLLMError when quota is exhausted after retries.
     """
     try:
-        return client.chat.completions.create(**kwargs), None
-    except OpenAIRateLimitError as exc:
-        raise RateLimitError(groq_quota_user_message(exc)) from exc
+        return retryable_chat_create(client, **kwargs), None
+    except (OpenAIRateLimitError, APIConnectionError) as exc:
+        raise ApplylyticsLLMError(
+            groq_quota_user_message(exc),
+            cause=exc,
+        ) from exc
     except APIError as exc:
         status = getattr(exc, "status_code", None)
         if status == 429 or str(status) == "429":
-            raise RateLimitError(groq_quota_user_message(exc)) from exc
+            raise ApplylyticsLLMError(
+                groq_quota_user_message(exc),
+                cause=exc,
+            ) from exc
         if status == 413 or str(status) == "413":
             return None, (
                 "Groq API error (413): Request payload too large. "
