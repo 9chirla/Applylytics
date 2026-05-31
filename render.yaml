@@ -1,3 +1,21 @@
+# Applylytics on Render — three components:
+#
+# 1. applylytics-redis (Redis)
+#    Shared queue for rq. Web enqueues email jobs; worker consumes them.
+#
+# 2. applylytics (web — Streamlit)
+#    User-facing app: PDF upload, ATS (keyword + semantic), CV optimisation, DOCX download.
+#    First semantic ATS run downloads sentence-transformers (~90MB). TRANSFORMERS_CACHE
+#    points at /tmp/hf_cache so weights live on ephemeral disk and stay out of heap.
+#
+# 3. rq-worker (background worker)
+#    Runs: rq worker --with-scheduler
+#    Sends optimised CV emails via Brevo. Must use the same REDIS_URL as the web service.
+#
+# Set these secrets on BOTH web and worker in the Render dashboard:
+#   GROQ_API_KEY, GEMINI_API_KEY, BREVO_API_KEY
+# Optional: BREVO_SENDER_EMAIL, BREVO_SENDER_NAME, APP_PASSWORD, PORTFOLIO_URL
+
 services:
   - type: redis
     name: applylytics-redis
@@ -16,6 +34,8 @@ services:
           property: connectionString
       - key: GROQ_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: BREVO_API_KEY
         sync: false
 
@@ -23,7 +43,7 @@ services:
     name: applylytics
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port=10000
+    startCommand: streamlit run app.py --server.port=10000 --server.address=0.0.0.0
     envVars:
       - key: REDIS_URL
         fromService:
@@ -32,5 +52,11 @@ services:
           property: connectionString
       - key: GROQ_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: BREVO_API_KEY
         sync: false
+      - key: TRANSFORMERS_CACHE
+        value: /tmp/hf_cache
+      - key: HF_HOME
+        value: /tmp/hf_cache

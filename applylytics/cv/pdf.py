@@ -10,6 +10,29 @@ import pdfplumber
 MAX_PDF_BYTES = 10 * 1024 * 1024
 PDF_MAGIC = b"%PDF"
 
+_JOB_DESCRIPTION_PHRASES = (
+    "we are looking for",
+    "responsibilities include",
+    "requirements:",
+    "qualifications:",
+    "about the role",
+    "you will",
+    "must have",
+)
+
+
+def detect_is_job_description(text: str) -> bool:
+    """
+    Heuristic: True when extracted PDF text looks like a job posting, not a CV.
+
+    Requires 3+ known JD phrases (case-insensitive substring match).
+    """
+    if not (text or "").strip():
+        return False
+    lower = text.lower()
+    hits = sum(1 for phrase in _JOB_DESCRIPTION_PHRASES if phrase in lower)
+    return hits >= 3
+
 
 def validate_pdf(file_bytes: bytes, *, mime_type: str | None = None) -> tuple[bool, str]:
     """

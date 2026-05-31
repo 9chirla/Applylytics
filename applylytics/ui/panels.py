@@ -29,7 +29,11 @@ from applylytics.cv.renderer import (
     render_cv_to_text,
     render_docx_to_bytes,
 )
-from applylytics.cv.pdf import extract_text_from_pdf_bytes, validate_pdf
+from applylytics.cv.pdf import (
+    detect_is_job_description,
+    extract_text_from_pdf_bytes,
+    validate_pdf,
+)
 from applylytics.llm.client import ApplylyticsLLMError, RateLimitError
 from applylytics.queue import ping_redis
 from applylytics.ui.logic import (
@@ -42,6 +46,7 @@ from applylytics.ui.logic import (
     optimise_queue_signature,
     optimised_hm_cache_key,
     phase_key,
+    record_export_feedback,
     resolve_template_choice,
     resolve_template_path,
     sanitize_coach_display,
@@ -1044,8 +1049,24 @@ def _render_download_button(
             key="dl_docx_optimised",
             disabled=disabled,
         )
+        _render_export_feedback_buttons()
     except Exception as exc:
         st.error(f"DOCX render failed: {exc}")
+
+
+def _render_export_feedback_buttons() -> None:
+    """Thumbs up/down after a successful DOCX download control."""
+    opt_ats = st.session_state.get(SessionKey.OPTIMISED_ATS_RESULT) or {}
+    score = int(opt_ats.get("keyword_score", opt_ats.get("score", 0)))
+    fb1, fb2 = st.columns(2)
+    with fb1:
+        if st.button("👍 Helpful", key="export_fb_helpful", use_container_width=True):
+            record_export_feedback("optimised_export", score, helpful=True)
+            st.toast("Thanks for the feedback!")
+    with fb2:
+        if st.button("👎 Not helpful", key="export_fb_not_helpful", use_container_width=True):
+            record_export_feedback("optimised_export", score, helpful=False)
+            st.toast("Thanks for the feedback!")
 
 
 def render_results_container(
@@ -1088,6 +1109,12 @@ def render_results_container(
                     "and try again."
                 )
                 return
+            if detect_is_job_description(resume_text):
+                st.error(
+                    "This looks like a job description, not a CV. "
+                    "Please upload your CV file."
+                )
+                st.stop()
             ats_result = _run_ats_scoring(resume_text, job_description)
             st.session_state[SessionKey.RESUME_TEXT] = resume_text
             st.session_state[SessionKey.ATS_RESULT] = ats_result

@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from applylytics.constants import (
+    APP_DIR,
     CV_TEMPLATE_CHOICES,
     DEFAULT_CV_TEMPLATE,
     RATE_LIMIT_WARNING,
     resolve_cv_template,
 )
+
+FEEDBACK_JSONL = APP_DIR / "data" / "feedback.jsonl"
 from applylytics.llm.client import ApplylyticsLLMError, RateLimitError
 
 _JOB_DESCRIPTION_BLOCKLIST = (
@@ -209,6 +214,25 @@ def evaluate_rq_email_job(
         }
 
     return {**idle, "in_progress": True}
+
+
+def feedback_file_path() -> Path:
+    """Path to append-only export feedback log."""
+    return FEEDBACK_JSONL
+
+
+def record_export_feedback(phase: str, score: int, helpful: bool) -> None:
+    """Append one JSON line of export feedback (creates data/ if needed)."""
+    path = feedback_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "phase": phase,
+        "ats_score": int(score),
+        "helpful": bool(helpful),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def _format_rq_failure(job: Any) -> str:

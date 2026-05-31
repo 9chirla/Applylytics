@@ -33,6 +33,7 @@ wheels/
 # IDE / OS
 .idea/
 .vscode/
+.cursor/
 .DS_Store
 
 # Streamlit
@@ -40,6 +41,9 @@ wheels/
 
 # Dead local demo (not part of the Streamlit app)
 frontend/
+
+# Local feedback log (append-only JSONL)
+data/
 
 # Logs and temp files
 rq-worker.log
