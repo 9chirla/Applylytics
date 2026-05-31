@@ -18,7 +18,8 @@ from applylytics.config import bootstrap_settings, settings
 
 # Streamlit Cloud: load secrets before panels/LLM modules import settings.
 bootstrap_settings()
-from applylytics.constants import ASSETS_DIR, CV_TEMPLATE_CHOICES, CV_TEMPLATE_DOCX, SessionKey
+from applylytics.constants import ASSETS_DIR, SessionKey  # noqa: E402
+from applylytics.preflight import PreflightStatus, run_preflight, service_indicator
 from applylytics.ui.components import render_hero_section, render_top_bar, scroll_to_snap
 from applylytics.ui.panels import (
     build_step_status,
@@ -33,6 +34,37 @@ def inject_design_system() -> None:
     """Inject global CSS."""
     css = (ASSETS_DIR / "design.css").read_text()
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+
+def _ensure_preflight() -> PreflightStatus:
+    if SessionKey.PREFLIGHT not in st.session_state:
+        st.session_state[SessionKey.PREFLIGHT] = run_preflight()
+    return st.session_state[SessionKey.PREFLIGHT]
+
+
+def _render_preflight_sidebar(status: PreflightStatus) -> None:
+    with st.sidebar:
+        st.markdown("### Service status")
+        st.markdown(
+            f"{service_indicator(status.templates_ok)} **CV templates**"
+            + (" — missing: " + ", ".join(status.missing_templates) if status.missing_templates else "")
+        )
+        st.markdown(
+            f"{service_indicator(status.groq_ok)} **Groq LLM**"
+            + ("" if status.groq_ok else " — set `GROQ_API_KEY` in `.env` or Secrets")
+        )
+        redis_label = "Redis / email queue"
+        if status.redis_ok:
+            st.markdown(f"{service_indicator(True)} **{redis_label}**")
+        else:
+            st.markdown(
+                f"{service_indicator(False, degraded=True)} **{redis_label}** — "
+                "start Redis and `rq worker --with-scheduler`"
+            )
+        if not status.llm_enabled:
+            st.caption("AI scoring and optimisation are disabled until Groq is configured.")
+        if not status.email_enabled:
+            st.caption("Background email uses in-app send when Redis is unavailable.")
 
 
 def _check_auth() -> None:
@@ -64,17 +96,19 @@ def main() -> None:
         page_title="Applylytics",
         page_icon="📄",
         layout="wide",
-        initial_sidebar_state="collapsed",
+        initial_sidebar_state="expanded",
     )
-    missing_tpl = [
-        name for name, path in CV_TEMPLATE_CHOICES.items() if not path.is_file()
-    ]
-    if missing_tpl or not CV_TEMPLATE_DOCX.is_file():
-        st.error(
-            "Missing CV templates: "
-            + ", ".join(missing_tpl or [str(CV_TEMPLATE_DOCX)])
+
+    preflight = _ensure_preflight()
+    _render_preflight_sidebar(preflight)
+
+    if not preflight.templates_ok:
+        st.warning(
+            "Some CV templates are missing: "
+            + ", ".join(preflight.missing_templates)
+            + ". DOCX export may fall back to MasterTemplate."
         )
-        st.stop()
+
     _check_auth()
     portfolio_url = (
         (settings.portfolio_url or "https://github.com/9chirla").strip()

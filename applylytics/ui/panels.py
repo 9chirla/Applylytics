@@ -21,7 +21,6 @@ from applylytics.constants import (
     DEFAULT_CV_TEMPLATE,
     RATE_LIMIT_WARNING,
     SessionKey,
-    resolve_cv_template,
 )
 from applylytics.cv.optimiser import _fix_concatenated_words, optimize_cv_generic
 from applylytics.cv.renderer import (
@@ -32,6 +31,22 @@ from applylytics.cv.renderer import (
 )
 from applylytics.cv.pdf import extract_text_from_pdf_bytes, validate_pdf
 from applylytics.llm.client import ApplylyticsLLMError, RateLimitError
+from applylytics.queue import ping_redis
+from applylytics.ui.logic import (
+    RQ_EMAIL_TIMEOUT_SECONDS,
+    RQ_WORKER_OFFLINE_MSG,
+    evaluate_rq_email_job,
+    format_llm_warning_message,
+    input_signature,
+    normalize_job_description_input,
+    optimise_queue_signature,
+    optimised_hm_cache_key,
+    phase_key,
+    resolve_template_choice,
+    resolve_template_path,
+    sanitize_coach_display,
+    serialisable_cv_payload,
+)
 from applylytics.llm.coach import analyze_resume_with_job, get_hiring_manager_comment
 from applylytics.ui.components import (
     EMPTY_STATE_HTML,
@@ -54,11 +69,8 @@ logger = logging.getLogger("applylytics")
 
 def _show_llm_warning(exc: BaseException) -> None:
     """Surface LLM quota/connection failures without crashing the app."""
-    if isinstance(exc, ApplylyticsLLMError):
-        st.warning(exc.user_message)
-        return
-    if isinstance(exc, RateLimitError):
-        st.warning(str(exc).strip() or RATE_LIMIT_WARNING)
+    if isinstance(exc, (ApplylyticsLLMError, RateLimitError)):
+        st.warning(format_llm_warning_message(exc))
         return
     raise exc
 
@@ -71,13 +83,6 @@ def _skeleton() -> Iterator[None]:
         yield
     finally:
         ph.empty()
-
-
-def _phase_key(resume_text: str, job_description: str) -> str:
-    return (
-        f"{hashlib.sha256(resume_text.encode()).hexdigest()[:16]}:"
-        f"{hashlib.sha256(job_description.encode()).hexdigest()[:24]}"
-    )
 
 
 @st.cache_data(show_spinner=False)
@@ -99,86 +104,88 @@ def _get_target_company() -> str:
     return (st.session_state.get("target_company_input", "") or "").strip()
 
 
-def _optimise_queue_signature(
-    *,
-    email: str,
-    company: str,
-    resume_text: str,
-    job_description: str,
-) -> str:
-    return f"{email}|{company}|{len(resume_text)}|{len(job_description)}"
-
-
-RQ_EMAIL_STUCK_SECONDS = 90
-
-
 def _get_cv_template_choice() -> str:
-    choice = st.session_state.get(SessionKey.CV_TEMPLATE) or DEFAULT_CV_TEMPLATE
-    if choice in CV_TEMPLATE_CHOICES:
-        return str(choice)
-    return DEFAULT_CV_TEMPLATE
+    return resolve_template_choice(st.session_state.get(SessionKey.CV_TEMPLATE))
+
+
+def _fetch_rq_job(job_id: str):
+    from rq.job import Job
+
+    from applylytics.queue import get_redis_connection
+
+    return Job.fetch(job_id, connection=get_redis_connection())
+
+
+def _rq_poll_state() -> dict:
+    return evaluate_rq_email_job(
+        job_id=st.session_state.get("_rq_job_id"),
+        queued_at=st.session_state.get("_rq_job_queued_at"),
+        now=time.time(),
+        redis_available=ping_redis(),
+        fetch_job=_fetch_rq_job,
+    )
+
+
+def _clear_rq_job_state() -> None:
+    for key in (
+        "_rq_job_id",
+        "_rq_job_queued_at",
+        "_rq_job_timed_out",
+        "_rq_worker_offline",
+    ):
+        st.session_state.pop(key, None)
 
 
 def _rq_email_task_in_progress() -> bool:
-    """True while a background rq email job is still running (not stuck forever)."""
-    job_id = st.session_state.get("_rq_job_id")
-    if not job_id:
+    """True while a background rq email job is still running."""
+    state = _rq_poll_state()
+    if state.get("worker_offline"):
+        st.session_state["_rq_worker_offline"] = True
+        st.session_state["_email_queue_msg"] = state.get("failure_reason") or RQ_WORKER_OFFLINE_MSG
+        _clear_rq_job_state()
         return False
-    try:
-        from rq.job import Job
-
-        from applylytics.queue import get_redis_connection
-
-        job = Job.fetch(job_id, connection=get_redis_connection())
-        if job.is_finished or job.is_failed:
-            return False
-        queued_at = st.session_state.get("_rq_job_queued_at")
-        if queued_at is None:
-            st.session_state["_rq_job_queued_at"] = time.time()
-            return True
-        if time.time() - queued_at > RQ_EMAIL_STUCK_SECONDS:
-            st.session_state.pop("_rq_job_id", None)
-            st.session_state.pop("_rq_job_queued_at", None)
-            prev = (st.session_state.get("_email_queue_msg") or "").strip()
-            hint = (
-                "Email worker did not respond — start Redis and "
-                "`rq worker --with-scheduler`. "
-                "Your DOCX download is available below."
-            )
-            st.session_state["_email_queue_msg"] = (
-                f"{prev} {hint}".strip() if prev else hint
-            )
-            return False
-        return True
-    except Exception:
-        st.session_state.pop("_rq_job_id", None)
-        st.session_state.pop("_rq_job_queued_at", None)
+    if state.get("timed_out"):
+        st.session_state["_rq_job_timed_out"] = True
+        st.session_state["_email_queue_msg"] = state.get("failure_reason") or (
+            f"Email did not complete within {RQ_EMAIL_TIMEOUT_SECONDS} seconds."
+        )
+        _clear_rq_job_state()
         return False
+    if state.get("failed"):
+        reason = state.get("failure_reason") or "Background email job failed."
+        st.session_state["_email_queue_msg"] = f"Background job failed: {reason}"
+        _clear_rq_job_state()
+        st.session_state.pop("_email_task_sig", None)
+        return False
+    return bool(state.get("in_progress"))
 
 
 def _finish_rq_email_task() -> None:
     """If the background email job finished, update UI state and unlock the button."""
-    job_id = st.session_state.get("_rq_job_id")
-    if not job_id:
+    state = _rq_poll_state()
+    if state.get("worker_offline"):
+        st.session_state["_rq_worker_offline"] = True
+        st.session_state["_email_queue_msg"] = state.get("failure_reason") or RQ_WORKER_OFFLINE_MSG
+        _clear_rq_job_state()
         return
-    try:
-        from rq.job import Job
-
-        from applylytics.queue import get_redis_connection
-
-        job = Job.fetch(job_id, connection=get_redis_connection())
-        if not job.is_finished:
-            return
-        payload = job.result
-    except Exception as exc:
-        st.session_state["_email_queue_msg"] = f"Background job failed: {exc}"
-        st.session_state.pop("_rq_job_id", None)
-        st.session_state.pop("_rq_job_queued_at", None)
+    if state.get("timed_out"):
+        st.session_state["_rq_job_timed_out"] = True
+        st.session_state["_email_queue_msg"] = state.get("failure_reason") or (
+            f"Email did not complete within {RQ_EMAIL_TIMEOUT_SECONDS} seconds."
+        )
+        _clear_rq_job_state()
+        return
+    if state.get("failed"):
+        reason = state.get("failure_reason") or "Background email job failed."
+        st.session_state["_email_queue_msg"] = f"Background job failed: {reason}"
+        _clear_rq_job_state()
         st.session_state.pop("_email_task_sig", None)
         return
+    if not state.get("finished"):
+        return
 
-    st.session_state.pop("_rq_job_id", None)
-    st.session_state.pop("_rq_job_queued_at", None)
+    payload = state.get("result_payload")
+    _clear_rq_job_state()
     st.session_state.pop("_email_task_sig", None)
     if isinstance(payload, dict) and payload.get("status") == "success":
         inbox = payload.get("email") or "your inbox"
@@ -208,11 +215,6 @@ def _optimise_button_disabled() -> bool:
         st.session_state.get("_optimise_sync_busy")
         or _rq_email_task_in_progress()
     )
-
-
-def _serialisable_cv_payload(data: dict) -> dict:
-    """Strip private keys before sending optimised JSON to Celery."""
-    return {k: v for k, v in data.items() if not str(k).startswith("_")}
 
 
 def _run_sync_optimise(
@@ -312,25 +314,32 @@ def _queue_or_send_optimised_cv_email(
         "company_name": company_name,
         "resume_text": resume_text,
         "job_description": job_description,
-        "optimised_cv": _serialisable_cv_payload(result),
+        "optimised_cv": serialisable_cv_payload(result),
         "target_company": _get_target_company(),
         "template_name": _get_cv_template_choice(),
     }
-    try:
-        job = get_queue().enqueue(
-            deliver_optimised_cv_email_task,
-            kwargs=kwargs,
-            job_timeout=600,
-        )
-        st.session_state["_rq_job_id"] = job.id
-        st.session_state["_rq_job_queued_at"] = time.time()
-        st.session_state["_email_task_sig"] = queue_sig
-        st.session_state["_email_queue_msg"] = (
-            f"Your CV is ready below. Emailed copy sending to **{email}**…"
-        )
-        return True
-    except Exception:
-        pass
+    if not ping_redis():
+        st.session_state["_rq_worker_offline"] = True
+        st.warning(RQ_WORKER_OFFLINE_MSG)
+    else:
+        try:
+            job = get_queue().enqueue(
+                deliver_optimised_cv_email_task,
+                kwargs=kwargs,
+                job_timeout=600,
+            )
+            st.session_state["_rq_job_id"] = job.id
+            st.session_state["_rq_job_queued_at"] = time.time()
+            st.session_state.pop("_rq_job_timed_out", None)
+            st.session_state.pop("_rq_worker_offline", None)
+            st.session_state["_email_task_sig"] = queue_sig
+            st.session_state["_email_queue_msg"] = (
+                f"Your CV is ready below. Emailed copy sending to **{email}**…"
+            )
+            return True
+        except Exception:
+            st.session_state["_rq_worker_offline"] = True
+            st.warning(RQ_WORKER_OFFLINE_MSG)
 
     try:
         with st.spinner("Background worker unavailable — sending email from the app…"):
@@ -358,28 +367,14 @@ def _queue_or_send_optimised_cv_email(
 
 def _get_job_description() -> str:
     """Job description from widget session state (with code/prompt guard)."""
-    jd = st.session_state.get("job_description_input", "") or ""
-    if any(
-        marker in jd
-        for marker in (
-            "STRICT_SYSTEM_PROMPT",
-            "cv_optimizer.py",
-            "build_targeted_keyword_requirements",
-            "def render_",
-        )
-    ):
-        return ""
-    return jd.strip()
-
-
-def _input_signature(has_resume: bool, job_description: str, company: str = "") -> str:
-    payload = f"{has_resume}:{job_description}:{company}"
-    return hashlib.sha256(payload.encode()).hexdigest()[:20]
+    return normalize_job_description_input(
+        st.session_state.get("job_description_input", "") or ""
+    )
 
 
 def _sync_input_signature(has_resume: bool, job_description: str, company: str = "") -> None:
     """Reset cached results when resume, JD, or company changes."""
-    sig = _input_signature(has_resume, job_description, company)
+    sig = input_signature(has_resume, job_description, company)
     if st.session_state.get(SessionKey.INPUT_SIGNATURE) == sig:
         return
     st.session_state[SessionKey.INPUT_SIGNATURE] = sig
@@ -525,9 +520,9 @@ def _render_spacing_fix_warning(spacing_fixes: list | None) -> None:
 def _run_ats_scoring(resume_text: str, job_description: str) -> dict:
     """Score resume against JD (no UI — safe inside st.status)."""
     resume_text = _fix_concatenated_words(resume_text)
-    phase_key = _phase_key(resume_text, job_description)
-    if st.session_state.get(SessionKey.PHASE3_KEY) != phase_key:
-        st.session_state[SessionKey.PHASE3_KEY] = phase_key
+    pk = phase_key(resume_text, job_description)
+    if st.session_state.get(SessionKey.PHASE3_KEY) != pk:
+        st.session_state[SessionKey.PHASE3_KEY] = pk
         for key in (
             SessionKey.MANAGER_COMMENT,
             SessionKey.HM_FEEDBACK_CACHE_KEY,
@@ -580,28 +575,14 @@ def _display_ats_results(ats_result: dict) -> None:
         render_insight(str(insight))
 
 
-def _sanitize_coach_display(text: str) -> str:
-    """Strip markdown headings and fenced code blocks from coach output."""
-    lines: list[str] = []
-    for line in text.splitlines():
-        if line.strip().startswith("```"):
-            continue
-        if re.match(r"^#{1,6}\s+", line):
-            heading = re.sub(r"^#{1,6}\s+", "", line).strip()
-            lines.append(f"**{heading}**")
-        else:
-            lines.append(line)
-    return "\n".join(lines)
-
-
 def _fetch_original_hiring_manager_comment(
     resume_text: str,
     job_description: str,
     ats_result: dict,
 ) -> str | None:
     """Hiring manager feedback on the original (pre-optimisation) CV."""
-    phase_key = _phase_key(resume_text, job_description)
-    hm_fb_key = f"{phase_key}:original"
+    pk = phase_key(resume_text, job_description)
+    hm_fb_key = f"{pk}:original"
 
     if st.session_state.get(SessionKey.HM_FEEDBACK_CACHE_KEY) == hm_fb_key:
         return st.session_state.get(SessionKey.MANAGER_COMMENT)
@@ -627,16 +608,6 @@ def _fetch_original_hiring_manager_comment(
     return comment
 
 
-def _optimised_hm_cache_key(
-    resume_text: str,
-    job_description: str,
-    optimised_cv_text: str,
-) -> str:
-    phase_key = _phase_key(resume_text, job_description)
-    fp = hashlib.sha256(optimised_cv_text.encode()).hexdigest()[:20]
-    return f"{phase_key}:optimised:{fp}:fresh_v3"
-
-
 def _cached_optimised_hm_comment_valid(hm_key: str, comment: str | None) -> bool:
     if not comment or not str(comment).strip():
         return False
@@ -656,7 +627,7 @@ def _fetch_optimised_hiring_manager_comment(
     optimised_cv_text: str,
 ) -> str | None:
     """Hiring manager feedback on the optimised CV only (no before/after comparison)."""
-    hm_key = _optimised_hm_cache_key(resume_text, job_description, optimised_cv_text)
+    hm_key = optimised_hm_cache_key(resume_text, job_description, optimised_cv_text)
 
     cached = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
     if _cached_optimised_hm_comment_valid(hm_key, cached):
@@ -730,7 +701,7 @@ def render_optimised_cv_results(
 
     emit_html('<p class="al-results-label" style="margin-top:1.5rem;">Hiring manager · optimised CV</p>')
     opt_cv_text = render_cv_to_text(od).strip()
-    hm_key = _optimised_hm_cache_key(resume_text, job_description, opt_cv_text)
+    hm_key = optimised_hm_cache_key(resume_text, job_description, opt_cv_text)
     comment = st.session_state.get(SessionKey.OPTIMISED_MANAGER_COMMENT)
     if not _cached_optimised_hm_comment_valid(hm_key, comment):
         st.session_state.pop(SessionKey.OPTIMISED_MANAGER_COMMENT, None)
@@ -780,7 +751,7 @@ def render_ai_coach_panel(
             if isinstance(feedback, str) and feedback.startswith("Groq API error"):
                 st.error(feedback)
                 return
-            feedback = _sanitize_coach_display(feedback)
+            feedback = sanitize_coach_display(feedback)
             st.markdown(feedback)
 
 
@@ -862,7 +833,7 @@ def render_optimiser_panel(
             f"Applying to **{company}** — company name is already set from Step 2 and will appear in your email subject and file name."
         )
     company_for_sig = company
-    queue_sig = _optimise_queue_signature(
+    queue_sig = optimise_queue_signature(
         email=email,
         company=company_for_sig,
         resume_text=resume_text,
@@ -875,8 +846,26 @@ def render_optimiser_panel(
     if st.session_state.get("_rq_job_id"):
         _watch_rq_email_task()
 
+    if st.session_state.get("_rq_worker_offline"):
+        st.warning(
+            st.session_state.get("_email_queue_msg") or RQ_WORKER_OFFLINE_MSG
+        )
+    if st.session_state.get("_rq_job_timed_out"):
+        st.warning(
+            st.session_state.get("_email_queue_msg")
+            or f"Email did not complete within {RQ_EMAIL_TIMEOUT_SECONDS} seconds."
+        )
+        if st.button(
+            "Retry email send",
+            key="btn_rq_email_retry",
+            use_container_width=True,
+        ):
+            _clear_optimise_locks()
+            st.session_state.pop("_rq_job_timed_out", None)
+            st.rerun()
+
     queued_msg = st.session_state.get("_email_queue_msg")
-    if queued_msg:
+    if queued_msg and not st.session_state.get("_rq_worker_offline"):
         st.success(queued_msg)
     if _rq_email_task_in_progress():
         st.info(
@@ -1032,7 +1021,7 @@ def _render_download_button(
             disabled=True,
         )
         return
-    template_path = resolve_cv_template(_get_cv_template_choice())
+    template_path = resolve_template_path(_get_cv_template_choice())
     if not template_path.is_file():
         st.error(f"Template missing: {template_path}")
         return

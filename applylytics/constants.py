@@ -48,6 +48,7 @@ MAX_JOB_CONTEXT_CHARS_FAST = 6_000
 class SessionKey:
     """Streamlit session_state keys."""
 
+    PREFLIGHT = "preflight_status"
     OPTIMIZED_DATA = "optimized_data"
     OPTIMISED_ATS_RESULT = "optimised_ats_result"
     MANAGER_COMMENT = "manager_comment"

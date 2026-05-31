@@ -12,16 +12,33 @@ from applylytics.ats.keyword_scorer import calculate_ats_score as _keyword_ats_s
 
 logger = logging.getLogger("applylytics")
 
-_SEMANTIC_MODEL = None
+_SEMANTIC_MODEL_FALLBACK = None
 
 
+@st.cache_resource(show_spinner=False)
 def _get_semantic_model():
-    global _SEMANTIC_MODEL
-    if _SEMANTIC_MODEL is None:
+    """Load the embedding model once per Streamlit server process."""
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+
+def _get_semantic_model_for_tests():
+    """Non-Streamlit fallback (pytest) when cache_resource is unavailable."""
+    global _SEMANTIC_MODEL_FALLBACK
+    if _SEMANTIC_MODEL_FALLBACK is None:
         from sentence_transformers import SentenceTransformer
 
-        _SEMANTIC_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-    return _SEMANTIC_MODEL
+        _SEMANTIC_MODEL_FALLBACK = SentenceTransformer("all-MiniLM-L6-v2")
+    return _SEMANTIC_MODEL_FALLBACK
+
+
+def load_semantic_model():
+    """Return the cached SentenceTransformer instance."""
+    try:
+        return _get_semantic_model()
+    except Exception:
+        return _get_semantic_model_for_tests()
 
 
 def semantic_similarity_score(resume_text: str, job_text: str) -> int | None:
@@ -34,7 +51,7 @@ def semantic_similarity_score(resume_text: str, job_text: str) -> int | None:
     try:
         from sklearn.metrics.pairwise import cosine_similarity
 
-        model = _get_semantic_model()
+        model = load_semantic_model()
         cv_snip = (resume_text or "")[:12_000]
         jd_snip = (job_text or "")[:12_000]
         embeddings = model.encode([cv_snip, jd_snip])

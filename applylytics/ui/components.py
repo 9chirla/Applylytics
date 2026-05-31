@@ -170,29 +170,15 @@ def render_hero_section(step_status: dict[str, bool]) -> str:
 
 
 def score_match_title(score: int) -> str:
-    if score >= 80:
-        return "Strong Match"
-    if score >= 60:
-        return "Moderate Match"
-    if score >= 40:
-        return "Fair Match"
-    return "Needs Work"
+    from applylytics.ui.logic import ats_score_title
+
+    return ats_score_title(score)
 
 
 def score_match_description(score: int, matched_count: int, job_keyword_count: int) -> str:
-    total = max(job_keyword_count, 1)
-    if score >= 80:
-        tail = "You're in great shape for this role."
-    elif score >= 60:
-        tail = "You're close — a targeted rewrite could push this to 80%+."
-    elif score >= 40:
-        tail = "Several gaps remain — focus on missing phrases where truthful."
-    else:
-        tail = "Significant gaps — prioritise the missing keywords in your rewrite."
-    return (
-        f"{matched_count} of {total} skill phrases found. "
-        f"{tail}"
-    )
+    from applylytics.ui.logic import ats_score_description
+
+    return ats_score_description(score, matched_count, job_keyword_count)
 
 
 def render_score_ring(score: int) -> str:

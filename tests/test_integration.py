@@ -8,7 +8,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from openai import RateLimitError as OpenAIRateLimitError
 
-from applylytics.ats.scorer import calculate_ats_score
+import time
+
+from applylytics.ats.scorer import calculate_ats_score, load_semantic_model, semantic_similarity_score
 from applylytics.constants import CV_TEMPLATE_CHOICES
 from applylytics.cv.docx_generator import cv_context_from_structured, render_cv
 from applylytics.cv.renderer import render_docx_to_bytes
@@ -99,3 +101,28 @@ def test_docx_export_each_template_valid_size(template_name: str, tmp_path: Path
 
     via_renderer = render_docx_to_bytes(template_path, context)
     assert len(via_renderer) > 1024
+
+
+def test_load_semantic_model_returns_same_instance():
+    """Embedding model is cached once per process (not re-instantiated)."""
+    first = load_semantic_model()
+    second = load_semantic_model()
+    assert first is second
+
+
+def test_semantic_similarity_reuses_cached_model(monkeypatch):
+    """Two sequential scoring calls stay fast when encode uses the warm cached model."""
+    import numpy as np
+
+    model = load_semantic_model()
+
+    def _fast_encode(texts):
+        return np.zeros((len(texts), 8), dtype=float)
+
+    monkeypatch.setattr(model, "encode", _fast_encode)
+    start = time.perf_counter()
+    first = semantic_similarity_score(SAMPLE_CV, SAMPLE_JD)
+    second = semantic_similarity_score(SAMPLE_CV, SAMPLE_JD)
+    elapsed = time.perf_counter() - start
+    assert first is not None and second is not None
+    assert elapsed < 2.0
