@@ -6,7 +6,9 @@ import hashlib
 import logging
 import re
 import tempfile
+import time
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -14,7 +16,13 @@ import streamlit as st
 
 from applylytics.ats.scorer import calculate_ats_score_cached
 from applylytics.config import settings
-from applylytics.constants import CV_TEMPLATE_DOCX, RATE_LIMIT_WARNING, SessionKey
+from applylytics.constants import (
+    CV_TEMPLATE_CHOICES,
+    DEFAULT_CV_TEMPLATE,
+    RATE_LIMIT_WARNING,
+    SessionKey,
+    resolve_cv_template,
+)
 from applylytics.cv.optimiser import _fix_concatenated_words, optimize_cv_generic
 from applylytics.cv.renderer import (
     cv_context_from_structured,
@@ -22,7 +30,8 @@ from applylytics.cv.renderer import (
     render_cv_to_text,
     render_docx_to_bytes,
 )
-from applylytics.llm.client import RateLimitError
+from applylytics.cv.pdf import extract_text_from_pdf_bytes, validate_pdf
+from applylytics.llm.client import ApplylyticsLLMError, RateLimitError
 from applylytics.llm.coach import analyze_resume_with_job, get_hiring_manager_comment
 from applylytics.ui.components import (
     EMPTY_STATE_HTML,
@@ -30,6 +39,8 @@ from applylytics.ui.components import (
     emit_html,
     render_field_label,
     render_hiring_manager_comment,
+    render_role_target_card_marker,
+    render_target_application_banner,
     render_insight,
     render_action_buttons_marker,
     render_keyword_section,
@@ -38,9 +49,18 @@ from applylytics.ui.components import (
     render_score_panel,
     render_section_header,
 )
-from utils.pdf_extractor import extract_text_from_pdf
-
 logger = logging.getLogger("applylytics")
+
+
+def _show_llm_warning(exc: BaseException) -> None:
+    """Surface LLM quota/connection failures without crashing the app."""
+    if isinstance(exc, ApplylyticsLLMError):
+        st.warning(exc.user_message)
+        return
+    if isinstance(exc, RateLimitError):
+        st.warning(str(exc).strip() or RATE_LIMIT_WARNING)
+        return
+    raise exc
 
 
 @contextmanager
@@ -62,13 +82,7 @@ def _phase_key(resume_text: str, job_description: str) -> str:
 
 @st.cache_data(show_spinner=False)
 def _cached_extract_pdf(file_hash: str, file_bytes: bytes) -> str:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(file_bytes)
-        path = tmp.name
-    try:
-        return extract_text_from_pdf(path)
-    finally:
-        Path(path).unlink(missing_ok=True)
+    return extract_text_from_pdf_bytes(file_bytes)
 
 
 def _extract_resume_text(file_bytes: bytes) -> str:
@@ -79,6 +93,267 @@ def _extract_resume_text(file_bytes: bytes) -> str:
 def _has_resume_bytes() -> bool:
     raw = st.session_state.get(SessionKey.RESUME_BYTES)
     return isinstance(raw, (bytes, bytearray)) and len(raw) > 0
+
+
+def _get_target_company() -> str:
+    return (st.session_state.get("target_company_input", "") or "").strip()
+
+
+def _optimise_queue_signature(
+    *,
+    email: str,
+    company: str,
+    resume_text: str,
+    job_description: str,
+) -> str:
+    return f"{email}|{company}|{len(resume_text)}|{len(job_description)}"
+
+
+RQ_EMAIL_STUCK_SECONDS = 90
+
+
+def _get_cv_template_choice() -> str:
+    choice = st.session_state.get(SessionKey.CV_TEMPLATE) or DEFAULT_CV_TEMPLATE
+    if choice in CV_TEMPLATE_CHOICES:
+        return str(choice)
+    return DEFAULT_CV_TEMPLATE
+
+
+def _rq_email_task_in_progress() -> bool:
+    """True while a background rq email job is still running (not stuck forever)."""
+    job_id = st.session_state.get("_rq_job_id")
+    if not job_id:
+        return False
+    try:
+        from rq.job import Job
+
+        from applylytics.queue import get_redis_connection
+
+        job = Job.fetch(job_id, connection=get_redis_connection())
+        if job.is_finished or job.is_failed:
+            return False
+        queued_at = st.session_state.get("_rq_job_queued_at")
+        if queued_at is None:
+            st.session_state["_rq_job_queued_at"] = time.time()
+            return True
+        if time.time() - queued_at > RQ_EMAIL_STUCK_SECONDS:
+            st.session_state.pop("_rq_job_id", None)
+            st.session_state.pop("_rq_job_queued_at", None)
+            prev = (st.session_state.get("_email_queue_msg") or "").strip()
+            hint = (
+                "Email worker did not respond — start Redis and "
+                "`rq worker --with-scheduler`. "
+                "Your DOCX download is available below."
+            )
+            st.session_state["_email_queue_msg"] = (
+                f"{prev} {hint}".strip() if prev else hint
+            )
+            return False
+        return True
+    except Exception:
+        st.session_state.pop("_rq_job_id", None)
+        st.session_state.pop("_rq_job_queued_at", None)
+        return False
+
+
+def _finish_rq_email_task() -> None:
+    """If the background email job finished, update UI state and unlock the button."""
+    job_id = st.session_state.get("_rq_job_id")
+    if not job_id:
+        return
+    try:
+        from rq.job import Job
+
+        from applylytics.queue import get_redis_connection
+
+        job = Job.fetch(job_id, connection=get_redis_connection())
+        if not job.is_finished:
+            return
+        payload = job.result
+    except Exception as exc:
+        st.session_state["_email_queue_msg"] = f"Background job failed: {exc}"
+        st.session_state.pop("_rq_job_id", None)
+        st.session_state.pop("_rq_job_queued_at", None)
+        st.session_state.pop("_email_task_sig", None)
+        return
+
+    st.session_state.pop("_rq_job_id", None)
+    st.session_state.pop("_rq_job_queued_at", None)
+    st.session_state.pop("_email_task_sig", None)
+    if isinstance(payload, dict) and payload.get("status") == "success":
+        inbox = payload.get("email") or "your inbox"
+        st.session_state["_email_queue_msg"] = (
+            f"Email sent — check **{inbox}** for your DOCX. You can still download it below."
+        )
+    elif isinstance(payload, dict):
+        reason = payload.get("reason") or "Unknown error"
+        st.session_state["_email_queue_msg"] = f"Background job failed: {reason}"
+    else:
+        st.session_state["_email_queue_msg"] = "Background job finished with an unexpected result."
+
+
+@st.fragment(run_every=timedelta(seconds=2))
+def _watch_rq_email_task() -> None:
+    """Poll Redis/rq until the email job completes, then rerun the app."""
+    if not st.session_state.get("_rq_job_id"):
+        return
+    was_pending = _rq_email_task_in_progress()
+    _finish_rq_email_task()
+    if was_pending and not _rq_email_task_in_progress():
+        st.rerun()
+
+
+def _optimise_button_disabled() -> bool:
+    return bool(
+        st.session_state.get("_optimise_sync_busy")
+        or _rq_email_task_in_progress()
+    )
+
+
+def _serialisable_cv_payload(data: dict) -> dict:
+    """Strip private keys before sending optimised JSON to Celery."""
+    return {k: v for k, v in data.items() if not str(k).startswith("_")}
+
+
+def _run_sync_optimise(
+    resume_text: str,
+    job_description: str,
+    missing_kw: list,
+) -> dict | None:
+    """Run CV optimiser in-process; return result dict or None on rate limit / error."""
+    from applylytics.llm.groq_optimizer import (
+        build_targeted_keyword_requirements,
+        get_gemini_client,
+    )
+
+    ats = st.session_state.get(SessionKey.ATS_RESULT, {})
+    targeted_block = build_targeted_keyword_requirements(
+        missing_keywords=ats.get("missing_keywords", []),
+        matched_keywords=ats.get("matched_keywords", []),
+        job_description=job_description,
+    )
+    with _skeleton():
+        _opt_label = (
+            "Running CV optimiser (Groq, Gemini fallback if needed)…"
+            if get_gemini_client()
+            else "Running generic CV optimiser (Groq)…"
+        )
+        with st.spinner(_opt_label):
+            return optimize_cv_generic(
+                resume_text,
+                job_description,
+                missing_kw,
+                keyword_requirements_block=targeted_block,
+            )
+
+
+def _store_optimise_results(
+    result: dict,
+    resume_text: str,
+    job_description: str,
+    *,
+    fetch_hm_comment: bool = True,
+) -> None:
+    """Persist optimised CV to session and refresh ATS / coach UI."""
+    st.session_state[SessionKey.OPTIMIZED_DATA] = result
+    try:
+        st.session_state[SessionKey.OPTIMISED_CV] = render_cv_to_text(result)
+    except Exception:
+        st.session_state[SessionKey.OPTIMISED_CV] = str(result)
+        st.warning("Could not format optimised CV as text; showing raw summary.")
+    st.session_state.pop(SessionKey.HM_FEEDBACK_CACHE_KEY, None)
+    st.session_state.pop(SessionKey.OPTIMISED_MANAGER_COMMENT, None)
+    st.session_state.pop("_optimised_hm_cache_key", None)
+    st.session_state.pop("_optimised_hm_fetch_failed", None)
+    with st.spinner("Scoring optimised CV…"):
+        opt_ats = _score_optimised_cv(result, job_description)
+    st.session_state[SessionKey.OPTIMISED_ATS_RESULT] = opt_ats
+    if fetch_hm_comment:
+        opt_cv_text = st.session_state.get(SessionKey.OPTIMISED_CV, "")
+        if isinstance(opt_cv_text, str) and opt_cv_text.strip():
+            _fetch_optimised_hiring_manager_comment(
+                resume_text,
+                job_description,
+                int(opt_ats.get("score", 0)),
+                opt_cv_text.strip(),
+            )
+
+
+def _clear_optimise_locks() -> None:
+    for key in (
+        "_rq_job_id",
+        "_rq_job_queued_at",
+        "_email_task_sig",
+        "_email_queue_msg",
+        "_optimise_sync_busy",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _queue_or_send_optimised_cv_email(
+    *,
+    email: str,
+    recipient_name: str,
+    job_title: str,
+    company_name: str,
+    resume_text: str,
+    job_description: str,
+    result: dict,
+    queue_sig: str,
+) -> bool:
+    """Queue rq email job; fall back to in-app send if the worker is unavailable."""
+    from applylytics.queue import get_queue
+    from applylytics.tasks import _docx_and_email, deliver_optimised_cv_email_task
+
+    kwargs = {
+        "recipient_email": email,
+        "recipient_name": recipient_name,
+        "job_title": job_title,
+        "company_name": company_name,
+        "resume_text": resume_text,
+        "job_description": job_description,
+        "optimised_cv": _serialisable_cv_payload(result),
+        "target_company": _get_target_company(),
+        "template_name": _get_cv_template_choice(),
+    }
+    try:
+        job = get_queue().enqueue(
+            deliver_optimised_cv_email_task,
+            kwargs=kwargs,
+            job_timeout=600,
+        )
+        st.session_state["_rq_job_id"] = job.id
+        st.session_state["_rq_job_queued_at"] = time.time()
+        st.session_state["_email_task_sig"] = queue_sig
+        st.session_state["_email_queue_msg"] = (
+            f"Your CV is ready below. Emailed copy sending to **{email}**…"
+        )
+        return True
+    except Exception:
+        pass
+
+    try:
+        with st.spinner("Background worker unavailable — sending email from the app…"):
+            outcome = _docx_and_email(**kwargs)
+    except Exception as exc:
+        st.warning(
+            f"CV optimised on screen, but email could not be sent. "
+            f"Download your DOCX below. ({exc})"
+        )
+        return False
+
+    if outcome.get("status") == "success":
+        st.session_state["_email_queue_msg"] = (
+            f"Email sent — check **{email}** for your DOCX. You can still download it below."
+        )
+        st.session_state["_email_task_sig"] = queue_sig
+        return False
+
+    reason = outcome.get("reason") or "Email sending failed"
+    st.warning(
+        f"CV optimised on screen, but email failed: {reason}. Download your DOCX below."
+    )
+    return False
 
 
 def _get_job_description() -> str:
@@ -97,13 +372,14 @@ def _get_job_description() -> str:
     return jd.strip()
 
 
-def _input_signature(has_resume: bool, job_description: str) -> str:
-    return hashlib.sha256(f"{has_resume}:{job_description}".encode()).hexdigest()[:20]
+def _input_signature(has_resume: bool, job_description: str, company: str = "") -> str:
+    payload = f"{has_resume}:{job_description}:{company}"
+    return hashlib.sha256(payload.encode()).hexdigest()[:20]
 
 
-def _sync_input_signature(has_resume: bool, job_description: str) -> None:
-    """Reset cached results when resume or JD changes."""
-    sig = _input_signature(has_resume, job_description)
+def _sync_input_signature(has_resume: bool, job_description: str, company: str = "") -> None:
+    """Reset cached results when resume, JD, or company changes."""
+    sig = _input_signature(has_resume, job_description, company)
     if st.session_state.get(SessionKey.INPUT_SIGNATURE) == sig:
         return
     st.session_state[SessionKey.INPUT_SIGNATURE] = sig
@@ -119,6 +395,11 @@ def _sync_input_signature(has_resume: bool, job_description: str) -> None:
         SessionKey.OPTIMISED_MANAGER_COMMENT,
         SessionKey.HM_FEEDBACK_CACHE_KEY,
         "_optimised_hm_fetch_failed",
+        "_rq_job_id",
+        "_rq_job_queued_at",
+        "_email_task_sig",
+        "_email_queue_msg",
+        "_optimise_sync_busy",
     ):
         st.session_state.pop(key, None)
 
@@ -129,13 +410,19 @@ def _request_analyse() -> None:
     )
 
 
-def build_step_status(has_resume: bool, job_description: str) -> dict[str, bool]:
-    """Step indicator state for hero (upload → JD → analyse → optimise)."""
+def build_step_status(
+    has_resume: bool,
+    job_description: str,
+    company: str = "",
+) -> dict[str, bool]:
+    """Step indicator state for hero (upload → role → analyse → optimise)."""
     od = st.session_state.get(SessionKey.OPTIMIZED_DATA)
     optimised = isinstance(od, dict) and not od.get("error")
+    has_jd = bool((job_description or "").strip())
     return {
         "upload": has_resume,
-        "jd": bool((job_description or "").strip()),
+        "jd": has_jd,
+        "company": bool((company or "").strip()),
         "analyse": int(st.session_state.get(SessionKey.ANALYSE_DONE_ID, 0)) > 0,
         "optimise": optimised,
     }
@@ -147,10 +434,19 @@ def render_upload_panel() -> tuple[str, bool]:
         "Step 2 · Upload",
         "Your resume +",
         "the role.",
-        "Upload your CV and paste the job description.<br>"
-        "We'll score the match and tell you exactly what's missing.",
+        "Upload your CV, paste the job description, and add the company name.<br>"
+        "The same details flow through scoring, optimisation, and your delivery email.",
     )
     render_field_label("01 — Resume")
+    template_choice = st.radio(
+        "CV template",
+        options=list(CV_TEMPLATE_CHOICES.keys()),
+        horizontal=True,
+        index=list(CV_TEMPLATE_CHOICES.keys()).index(DEFAULT_CV_TEMPLATE),
+        help="Layout used when you download or email your optimised DOCX.",
+        key="cv_template_radio",
+    )
+    st.session_state[SessionKey.CV_TEMPLATE] = template_choice
     uploaded = st.file_uploader(
         "Resume (PDF)",
         type=["pdf"],
@@ -158,17 +454,32 @@ def render_upload_panel() -> tuple[str, bool]:
         label_visibility="collapsed",
         key="resume_pdf_upload",
     )
-    render_field_label("02 — Job description")
-    job_description = st.text_area(
-        "Job description",
-        height=130,
-        placeholder="Paste the full job posting — requirements, responsibilities, tools...",
-        help="Used for ATS keyword overlap and all AI prompts.",
-        label_visibility="collapsed",
-        key="job_description_input",
-    )
+    render_field_label("02 — Target role")
+    with st.container(border=True):
+        render_role_target_card_marker()
+        job_description = st.text_area(
+            label="Job description",
+            height=140,
+            placeholder="Paste the full job posting — requirements, responsibilities, tools...",
+            help="Used for ATS keyword overlap and all AI prompts.",
+            label_visibility="visible",
+            key="job_description_input",
+        )
+        st.text_input(
+            label="Company name (optional)",
+            placeholder="e.g. Buitelaar Analytics",
+            help="Used across ATS, optimised CV export, email subject, and attachment filename.",
+            label_visibility="visible",
+            key="target_company_input",
+        )
     if uploaded is not None:
-        st.session_state[SessionKey.RESUME_BYTES] = uploaded.getvalue()
+        raw = uploaded.getvalue()
+        ok, err = validate_pdf(raw, mime_type=getattr(uploaded, "type", None))
+        if not ok:
+            st.error(err)
+            st.session_state.pop(SessionKey.RESUME_BYTES, None)
+        else:
+            st.session_state[SessionKey.RESUME_BYTES] = raw
 
     has_resume = _has_resume_bytes()
 
@@ -179,7 +490,8 @@ def render_upload_panel() -> tuple[str, bool]:
             "paste the actual job posting text."
         )
 
-    _sync_input_signature(has_resume, job_description)
+    company = _get_target_company()
+    _sync_input_signature(has_resume, job_description, company)
 
     can_analyse = has_resume and bool(job_description)
     if st.button(
@@ -198,7 +510,7 @@ def render_upload_panel() -> tuple[str, bool]:
     if can_analyse and run_id <= done_id:
         st.caption("Click **Analyse match →** to run scoring.")
 
-    return job_description, has_resume
+    return job_description, has_resume, company
 
 
 def _render_spacing_fix_warning(spacing_fixes: list | None) -> None:
@@ -302,8 +614,8 @@ def _fetch_original_hiring_manager_comment(
                 int(ats_result.get("score", 0)),
                 optimised_text=None,
             )
-    except RateLimitError:
-        st.warning(RATE_LIMIT_WARNING)
+    except (ApplylyticsLLMError, RateLimitError) as exc:
+        _show_llm_warning(exc)
         return None
     if comment is None:
         return None
@@ -358,8 +670,8 @@ def _fetch_optimised_hiring_manager_comment(
                 optimised_score,
                 fresh_review=True,
             )
-    except RateLimitError:
-        st.warning(RATE_LIMIT_WARNING)
+    except (ApplylyticsLLMError, RateLimitError) as exc:
+        _show_llm_warning(exc)
         return None
     if comment is None:
         st.session_state["_optimised_hm_fetch_failed"] = True
@@ -460,8 +772,8 @@ def render_ai_coach_panel(
                 with _skeleton():
                     with st.spinner("Analyzing with Groq Llama 3.3…"):
                         feedback = analyze_resume_with_job(resume_text, job_description)
-            except RateLimitError:
-                st.warning(RATE_LIMIT_WARNING)
+            except (ApplylyticsLLMError, RateLimitError) as exc:
+                _show_llm_warning(exc)
                 return
             if feedback is None:
                 return
@@ -470,6 +782,18 @@ def render_ai_coach_panel(
                 return
             feedback = _sanitize_coach_display(feedback)
             st.markdown(feedback)
+
+
+def _extract_job_metadata(job_description: str) -> tuple[str, str]:
+    """Job title and company: user-entered company wins over parsed JD text."""
+    from applylytics.email.job_metadata import build_job_metadata
+
+    meta = build_job_metadata(
+        job_description,
+        company_override=_get_target_company(),
+    )
+    company = meta.company_name or ""
+    return meta.job_title, company
 
 
 def _render_ats_debug_expander(debug: dict) -> None:
@@ -498,12 +822,73 @@ def render_optimiser_panel(
     ats_result: dict,
 ) -> None:
     """Optimise CV + DOCX download action row."""
-    from utils.cv_optimizer import build_targeted_keyword_requirements, get_gemini_client
+    from applylytics.llm.groq_optimizer import (
+        build_targeted_keyword_requirements,
+        get_gemini_client,
+    )
 
     missing_kw = ats_result["missing_keywords"]
-    od = st.session_state.get(SessionKey.OPTIMIZED_DATA)
-    optimised_ready = isinstance(od, dict) and not od.get("error")
 
+    render_field_label("03 — Optimise & export")
+    company = _get_target_company()
+    job_title, _parsed_co = _extract_job_metadata(job_description)
+    render_target_application_banner(company=company, role_title=job_title)
+
+    with st.container(border=True):
+        emit_html('<div class="al-delivery-card-marker" aria-hidden="true"></div>')
+        emit_html('<p class="al-field-group-title">Email delivery (optional)</p>')
+        recipient_email = st.text_input(
+            label="Email address",
+            placeholder="you@example.com",
+            help="If provided, your CV is optimised on screen immediately and the same DOCX is emailed via Brevo (rq worker or direct send).",
+            label_visibility="visible",
+            key="optimise_recipient_email",
+        )
+        recipient_name = st.text_input(
+            label="Your name (for email greeting)",
+            placeholder="Alex",
+            label_visibility="visible",
+            key="optimise_recipient_name",
+        )
+
+    email = (recipient_email or "").strip()
+    if email:
+        st.caption(
+            "With an email set, you still get your optimised CV **on screen immediately** "
+            "(download below). The same file is emailed to you in the background."
+        )
+    elif company:
+        st.caption(
+            f"Applying to **{company}** — company name is already set from Step 2 and will appear in your email subject and file name."
+        )
+    company_for_sig = company
+    queue_sig = _optimise_queue_signature(
+        email=email,
+        company=company_for_sig,
+        resume_text=resume_text,
+        job_description=job_description,
+    )
+    if st.session_state.get("_email_task_sig") != queue_sig:
+        st.session_state.pop("_email_queue_msg", None)
+
+    _finish_rq_email_task()
+    if st.session_state.get("_rq_job_id"):
+        _watch_rq_email_task()
+
+    queued_msg = st.session_state.get("_email_queue_msg")
+    if queued_msg:
+        st.success(queued_msg)
+    if _rq_email_task_in_progress():
+        st.info(
+            "Sending your email copy in the background. "
+            "You can download your DOCX below while it sends."
+        )
+    elif email and queued_msg and not _rq_email_task_in_progress():
+        if st.button("Send again", key="btn_email_queue_force", use_container_width=True):
+            _clear_optimise_locks()
+            st.rerun()
+
+    optimise_disabled = _optimise_button_disabled()
     render_action_buttons_marker()
     act1, act2 = st.columns(2)
     with act1:
@@ -512,63 +897,67 @@ def render_optimiser_panel(
             type="primary",
             use_container_width=True,
             key="btn_optimise_cv",
+            disabled=optimise_disabled,
         ):
+            if optimise_disabled:
+                return
+
+            st.session_state["_optimise_sync_busy"] = True
             try:
-                ats = st.session_state.get(SessionKey.ATS_RESULT, {})
-                targeted_block = build_targeted_keyword_requirements(
-                    missing_keywords=ats.get("missing_keywords", []),
-                    matched_keywords=ats.get("matched_keywords", []),
+                result = _run_sync_optimise(resume_text, job_description, missing_kw)
+            except (ApplylyticsLLMError, RateLimitError) as exc:
+                _show_llm_warning(exc)
+                return
+            finally:
+                st.session_state["_optimise_sync_busy"] = False
+
+            if not result or result.get("error"):
+                st.error((result or {}).get("error") or "Optimisation failed.")
+                return
+
+            _store_optimise_results(result, resume_text, job_description)
+
+            if email:
+                job_title, company_name = _extract_job_metadata(job_description)
+                name = (recipient_name or "").strip() or "Candidate"
+                queued = _queue_or_send_optimised_cv_email(
+                    email=email,
+                    recipient_name=name,
+                    job_title=job_title,
+                    company_name=company_name,
+                    resume_text=resume_text,
                     job_description=job_description,
+                    result=result,
+                    queue_sig=queue_sig,
                 )
-                with _skeleton():
-                    _opt_label = (
-                        "Running CV optimiser (Groq, Gemini fallback if needed)…"
-                        if get_gemini_client()
-                        else "Running generic CV optimiser (Groq)…"
+                if queued:
+                    st.success(
+                        "Optimisation complete — download your CV below. "
+                        f"An emailed copy is on its way to **{email}**."
                     )
-                    with st.spinner(_opt_label):
-                        result = optimize_cv_generic(
-                            resume_text,
-                            job_description,
-                            missing_kw,
-                            keyword_requirements_block=targeted_block,
-                        )
-            except RateLimitError as exc:
-                st.warning(str(exc).strip() or RATE_LIMIT_WARNING)
-                return
-            if result.get("error"):
-                st.error(result["error"])
-                return
-            st.session_state[SessionKey.OPTIMIZED_DATA] = result
-            try:
-                st.session_state[SessionKey.OPTIMISED_CV] = render_cv_to_text(result)
-            except Exception:
-                st.session_state[SessionKey.OPTIMISED_CV] = str(result)
-                st.warning("Could not format optimised CV as text; showing raw summary.")
-            st.session_state.pop(SessionKey.HM_FEEDBACK_CACHE_KEY, None)
-            st.session_state.pop(SessionKey.OPTIMISED_MANAGER_COMMENT, None)
-            st.session_state.pop("_optimised_hm_cache_key", None)
-            st.session_state.pop("_optimised_hm_fetch_failed", None)
-            with st.spinner("Scoring optimised CV…"):
-                opt_ats = _score_optimised_cv(result, job_description)
-            st.session_state[SessionKey.OPTIMISED_ATS_RESULT] = opt_ats
-            opt_cv_text = st.session_state.get(SessionKey.OPTIMISED_CV, "")
-            if isinstance(opt_cv_text, str) and opt_cv_text.strip():
-                _fetch_optimised_hiring_manager_comment(
-                    resume_text,
-                    job_description,
-                    int(opt_ats.get("score", 0)),
-                    opt_cv_text.strip(),
+                elif st.session_state.get("_email_queue_msg"):
+                    st.success(
+                        "Optimisation complete — download your CV below. "
+                        "See the message above for email status."
+                    )
+            else:
+                st.success(
+                    "Optimisation complete — see your optimised score and hiring manager feedback below."
                 )
-            done_msg = "Optimisation complete — see your optimised score and hiring manager feedback below."
-            st.success(done_msg)
+
             if settings.debug_mode:
                 debug = result.get("_ats_debug")
                 if isinstance(debug, dict):
                     _render_ats_debug_expander(debug)
             st.rerun()
     with act2:
-        _render_download_button(resume_text, od if optimised_ready else None)
+        dl_od = st.session_state.get(SessionKey.OPTIMIZED_DATA)
+        dl_ready = isinstance(dl_od, dict) and not dl_od.get("error")
+        _render_download_button(
+            resume_text,
+            dl_od if dl_ready else None,
+            disabled=False,
+        )
 
     with st.expander("Advanced · reset optimisation", expanded=False):
         if st.button("Reset optimised CV", use_container_width=True):
@@ -581,6 +970,11 @@ def render_optimiser_panel(
                 "_optimised_hm_cache_key",
                 "_optimised_hm_fetch_failed",
                 SessionKey.ATS_RESULT,
+                "_email_task_sig",
+                "_email_queue_msg",
+                "_rq_job_id",
+                "_rq_job_queued_at",
+                "_optimise_sync_busy",
             ):
                 st.session_state.pop(key, None)
             st.rerun()
@@ -620,7 +1014,12 @@ def render_optimiser_panel(
                 )
 
 
-def _render_download_button(resume_text: str, od: dict | None) -> None:
+def _render_download_button(
+    resume_text: str,
+    od: dict | None,
+    *,
+    disabled: bool = False,
+) -> None:
     """Download DOCX in the action row (disabled until optimisation completes)."""
     if not isinstance(od, dict) or od.get("error"):
         st.download_button(
@@ -633,12 +1032,13 @@ def _render_download_button(resume_text: str, od: dict | None) -> None:
             disabled=True,
         )
         return
-    if not CV_TEMPLATE_DOCX.is_file():
-        st.error(f"Template missing: {CV_TEMPLATE_DOCX}")
+    template_path = resolve_cv_template(_get_cv_template_choice())
+    if not template_path.is_file():
+        st.error(f"Template missing: {template_path}")
         return
     try:
         docx_bytes = render_docx_to_bytes(
-            CV_TEMPLATE_DOCX,
+            template_path,
             cv_context_from_structured(od, source_resume_text=resume_text),
         )
         safe_name = re.sub(
@@ -653,6 +1053,7 @@ def _render_download_button(resume_text: str, od: dict | None) -> None:
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             use_container_width=True,
             key="dl_docx_optimised",
+            disabled=disabled,
         )
     except Exception as exc:
         st.error(f"DOCX render failed: {exc}")
