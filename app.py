@@ -18,7 +18,7 @@ from applylytics.config import bootstrap_settings, settings
 
 # Streamlit Cloud: load secrets before panels/LLM modules import settings.
 bootstrap_settings()
-from applylytics.constants import ASSETS_DIR, CV_TEMPLATE_DOCX, SessionKey
+from applylytics.constants import ASSETS_DIR, CV_TEMPLATE_CHOICES, CV_TEMPLATE_DOCX, SessionKey
 from applylytics.ui.components import render_hero_section, render_top_bar, scroll_to_snap
 from applylytics.ui.panels import (
     build_step_status,
@@ -54,7 +54,7 @@ def _check_auth() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     try:
-        from utils.cv_optimizer import reset_gemini_client, reset_groq_client
+        from applylytics.llm.groq_optimizer import reset_gemini_client, reset_groq_client
 
         reset_groq_client()
         reset_gemini_client()
@@ -66,11 +66,20 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
-    if not CV_TEMPLATE_DOCX.is_file():
-        st.error(f"Template missing: {CV_TEMPLATE_DOCX}")
+    missing_tpl = [
+        name for name, path in CV_TEMPLATE_CHOICES.items() if not path.is_file()
+    ]
+    if missing_tpl or not CV_TEMPLATE_DOCX.is_file():
+        st.error(
+            "Missing CV templates: "
+            + ", ".join(missing_tpl or [str(CV_TEMPLATE_DOCX)])
+        )
         st.stop()
     _check_auth()
-    portfolio_url = (settings.portfolio_url or "https://github.com").strip() or "https://github.com"
+    portfolio_url = (
+        (settings.portfolio_url or "https://github.com/9chirla").strip()
+        or "https://github.com/9chirla"
+    )
     inject_design_system()
     render_top_bar(portfolio_url, portfolio_url)
 
@@ -78,15 +87,16 @@ def main() -> None:
     _rb = st.session_state.get(SessionKey.RESUME_BYTES)
     has_resume_pre = isinstance(_rb, (bytes, bytearray)) and len(_rb) > 0
     jd_pre = (st.session_state.get("job_description_input", "") or "").strip()
-    step_status = build_step_status(has_resume_pre, jd_pre)
+    company_pre = (st.session_state.get("target_company_input", "") or "").strip()
+    step_status = build_step_status(has_resume_pre, jd_pre, company_pre)
 
-    # Screen 1: Hero (snap section via CSS class on .al-hero itself)
+    # Screen 1: Hero
     st.markdown(render_hero_section(step_status), unsafe_allow_html=True)
 
     # Screen 2: Input (st.container groups widgets so snap CSS applies)
     with st.container():
         st.markdown('<div class="al-snap-input" aria-hidden="true"></div>', unsafe_allow_html=True)
-        job_description, has_resume = render_upload_panel()
+        job_description, has_resume, _company = render_upload_panel()
 
     # Screen 3: Results
     with st.container():

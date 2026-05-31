@@ -7,10 +7,28 @@ TEMPLATE_DIR = APP_DIR / "templates"
 CV_TEMPLATE_DOCX = TEMPLATE_DIR / "MasterTemplate.docx"
 ASSETS_DIR = APP_DIR / "assets"
 
+CV_TEMPLATE_CHOICES: dict[str, Path] = {
+    "Classic": TEMPLATE_DIR / "classic.docx",
+    "Modern": TEMPLATE_DIR / "Modern.docx",
+    "ATS-safe": TEMPLATE_DIR / "ats_safe.docx",
+}
+DEFAULT_CV_TEMPLATE = "Classic"
+
+
+def resolve_cv_template(name: str | None = None) -> Path:
+    """Return path to selected DOCX template; falls back to classic then MasterTemplate."""
+    key = (name or DEFAULT_CV_TEMPLATE).strip()
+    path = CV_TEMPLATE_CHOICES.get(key)
+    if path and path.is_file():
+        return path
+    if CV_TEMPLATE_CHOICES["Classic"].is_file():
+        return CV_TEMPLATE_CHOICES["Classic"]
+    return CV_TEMPLATE_DOCX
+
 RATE_LIMIT_WARNING = (
-    "⏳ Groq and/or Gemini rate limits were hit. Wait about a minute and try again. "
-    "If Gemini is configured, the app already retried with your fallback model "
-    "(default gemini-2.5-flash via GEMINI_MODEL in .env)."
+    "⏳ Groq rate limit (TPM). Wait ~10 seconds and try again. "
+    "The app retries with llama-3.1-8b-instant automatically; for fewer 429s set "
+    "GROQ_MODEL=llama-3.1-8b-instant in .env, or add a valid GEMINI_API_KEY."
 )
 
 TRUNCATION_WARNING = (
@@ -22,6 +40,9 @@ TRUNCATION_WARNING = (
 MAX_TEXT_CHARS = 24_000
 MAX_COMBINED_CHARS = 32_000
 MAX_CV_OPTIMIZER_CHARS = 18_000
+# Background/email optimise path — smaller payloads, fewer Groq tokens.
+MAX_CV_OPTIMIZER_CHARS_FAST = 12_000
+MAX_JOB_CONTEXT_CHARS_FAST = 6_000
 
 
 class SessionKey:
@@ -42,3 +63,4 @@ class SessionKey:
     INPUT_SIGNATURE = "_input_signature"
     RESUME_BYTES = "resume_pdf_bytes"
     RESUME_TEXT = "resume_text_cache"
+    CV_TEMPLATE = "cv_template_choice"
