@@ -90,6 +90,17 @@ def _normalize_work(item: Any) -> dict[str, Any] | None:
     }
 
 
+def _normalize_certification(item: Any) -> str:
+    """Flatten certification entries (strings or {title, issuer} dicts)."""
+    if isinstance(item, dict):
+        title = str(item.get("title") or item.get("name") or "").strip()
+        issuer = str(item.get("issuer") or item.get("organization") or item.get("provider") or "").strip()
+        if title and issuer:
+            return f"{title} ({issuer})"
+        return title or issuer
+    return str(item or "").lstrip("-• ").strip()
+
+
 def _normalize_education(item: Any) -> dict[str, Any] | None:
     if not isinstance(item, dict):
         return None
@@ -138,11 +149,16 @@ def normalize_cv_json(data: dict[str, Any]) -> dict[str, Any]:
         elif not isinstance(val, list):
             logger.warning("normalize_cv_json: %r should be a list — coercing", key)
             p[key] = [str(val).strip()] if str(val).strip() else []
+        elif key == "certifications":
+            p[key] = [_normalize_certification(x) for x in val]
+            p[key] = [c for c in p[key] if c]
         else:
             p[key] = [str(x).strip() for x in val if str(x).strip()]
 
+    if "certifications" not in p or not isinstance(p.get("certifications"), list):
+        p["certifications"] = []
     p["certifications"] = [
-        str(c).lstrip("-• ").strip() for c in p["certifications"] if str(c).lstrip("-• ").strip()
+        _normalize_certification(c) for c in p["certifications"] if _normalize_certification(c)
     ]
 
     raw_interests = p.get("interests")

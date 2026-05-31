@@ -38,7 +38,11 @@ wheels/
 # Streamlit
 .streamlit/secrets.toml
 
+# Dead local demo (not part of the Streamlit app)
+frontend/
+
 # Logs and temp files
+rq-worker.log
 *.log
 temp_*
 *.tmp

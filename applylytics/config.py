@@ -5,11 +5,16 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Streamlit Cloud secrets.toml / dashboard keys → Settings fields
 _SECRETS_FIELD_MAP: dict[str, str] = {
     "GROQ_API_KEY": "groq_api_key",
+    "BREVO_API_KEY": "brevo_api_key",
+    "BREVO_SENDER_EMAIL": "brevo_sender_email",
+    "BREVO_SENDER_NAME": "brevo_sender_name",
     "GEMINI_API_KEY": "gemini_api_key",
     "GEMINI_MODEL": "gemini_model",
     "GROQ_MODEL": "groq_model",
@@ -22,9 +27,12 @@ _PLACEHOLDER_MARKERS = (
     "your_actual_key_here",
     "your-key",
     "your_key",
+    "your_brevo_key",
     "changeme",
     "replace_me",
     "gsk_xxx",
+    # Placeholder from .env.example — not a real key
+    "aizasychwvvua77r8zeqpw77ab088joz8lozin0",
 )
 
 _API_KEY_HELP = (
@@ -47,7 +55,7 @@ def sync_streamlit_secrets_to_environ() -> None:
             if value is None:
                 continue
             text = str(value).strip()
-            if text:
+            if text and not _is_placeholder_key(text):
                 os.environ[secret_key] = text
     except FileNotFoundError:
         pass
@@ -69,7 +77,7 @@ def _streamlit_secrets_overrides() -> dict[str, Any]:
             if value is None:
                 continue
             text = str(value).strip()
-            if text:
+            if text and not _is_placeholder_key(text):
                 overrides[field_name] = value
     except FileNotFoundError:
         pass
@@ -95,11 +103,14 @@ class Settings(BaseSettings):
     )
 
     groq_api_key: str = ""
+    brevo_api_key: str = ""
+    brevo_sender_email: str = "9chirla@gmail.com"
+    brevo_sender_name: str = "Applylytics"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "llama-3.1-8b-instant"
     app_password: str | None = None
-    portfolio_url: str = "https://github.com"
+    portfolio_url: str = "https://github.com/9chirla"
     debug_mode: bool = False
 
 
@@ -112,6 +123,13 @@ def load_settings() -> Settings:
 def bootstrap_settings() -> Settings:
     """Load settings once at app startup (safe for Streamlit Cloud secrets)."""
     global settings
+    sync_streamlit_secrets_to_environ()
+    # Local .env must win over placeholder values in .streamlit/secrets.toml
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.is_file():
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=True)
     settings = load_settings()
     return settings
 
@@ -135,6 +153,30 @@ def resolve_gemini_api_key() -> str:
     key = (current.gemini_api_key or "").strip()
     if not key:
         key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if key and not _is_placeholder_key(key):
+        return key
+    return ""
+
+
+def load_project_dotenv() -> None:
+    """Load repo-root .env into os.environ (Celery workers must call before reading keys)."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.is_file():
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=True)
+
+
+def resolve_brevo_api_key() -> str:
+    """Return Brevo API key from .env / env (refreshed each call; never placeholders)."""
+    load_project_dotenv()
+    key = (os.getenv("BREVO_API_KEY") or "").strip()
+    if not key or _is_placeholder_key(key):
+        try:
+            current = load_settings()
+            key = (current.brevo_api_key or "").strip()
+        except Exception:
+            key = ""
     if key and not _is_placeholder_key(key):
         return key
     return ""
