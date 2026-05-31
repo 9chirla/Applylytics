@@ -8,7 +8,7 @@ from pathlib import Path
 from docx import Document
 from docx.oxml.ns import qn
 
-from utils.cv_generator import cv_context_from_structured, render_cv
+from applylytics.cv.docx_generator import cv_context_from_structured, render_cv
 
 ROOT = Path(__file__).resolve().parent.parent
 MASTER = ROOT / "templates" / "MasterTemplate.docx"

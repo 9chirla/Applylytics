@@ -2,7 +2,7 @@
 import re
 from typing import Set
 
-from .skill_loader import SKILL_KEYWORDS as _SKILLS_FROM_FILE
+from applylytics.ats.skill_loader import SKILL_KEYWORDS as _SKILLS_FROM_FILE
 
 # ~160 common English stopwords (no NLTK dependency)
 STOPWORDS = frozenset({

@@ -6,7 +6,7 @@ from applylytics.cv.sections import (
     is_placeholder_project_text,
     sanitize_projects,
 )
-from utils.cv_generator import cv_context_from_structured
+from applylytics.cv.docx_generator import cv_context_from_structured
 
 PLACEHOLDER = (
     "No projects listed. Candidate should add a personal project "

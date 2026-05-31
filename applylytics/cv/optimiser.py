@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
-from applylytics.llm.client import RateLimitError, is_groq_rate_limit_error
+from applylytics.llm.client import ApplylyticsLLMError, RateLimitError, is_groq_rate_limit_error
 from applylytics.llm.context import prepare_resume_job_texts
 from applylytics.llm import prompts
 from applylytics.ats.scorer import calculate_ats_score_cached
@@ -136,9 +136,10 @@ def optimize_cv_generic(
     missing_keywords: list[str],
     *,
     keyword_requirements_block: str = "",
+    fast_mode: bool = False,
 ) -> dict:
     """Generic CV optimiser via utils pipeline with keyword preservation."""
-    from utils.cv_optimizer import run_generic_cv_optimisation_pipeline
+    from applylytics.llm.groq_optimizer import run_generic_cv_optimisation_pipeline
 
     resume, job = prepare_resume_job_texts(resume_text, job_text)
     rt = _fix_concatenated_words(resume.strip())
@@ -151,12 +152,13 @@ def optimize_cv_generic(
         len(mk),
     )
 
-    try:
-        before_result = calculate_ats_score_cached(rt, jt)
-        score_before = int(before_result.get("score", 0))
-    except Exception as exc:
-        logger.warning("Operation failed: %s", exc)
-        score_before = 0
+    score_before = 0
+    if not fast_mode:
+        try:
+            before_result = calculate_ats_score_cached(rt, jt)
+            score_before = int(before_result.get("score", 0))
+        except Exception as exc:
+            logger.warning("Operation failed: %s", exc)
 
     keyword_block = _format_required_keywords_block(mk)
     combined_keyword_block = keyword_block + (keyword_requirements_block or "")
@@ -166,9 +168,11 @@ def optimize_cv_generic(
         job_text=jt,
         missing_keywords=mk,
         keyword_requirements_block=combined_keyword_block,
+        fast_mode=fast_mode,
     )
     if is_groq_rate_limit_error(out):
-        raise RateLimitError(str(out.get("error") or "Rate limit reached during CV optimisation."))
+        msg = str(out.get("error") or "Rate limit reached during CV optimisation.")
+        raise ApplylyticsLLMError(msg)
     if out.get("error"):
         logger.debug("optimize_cv_generic() pipeline error: %s", out["error"])
         return out
@@ -176,16 +180,17 @@ def optimize_cv_generic(
     out = _finalize_parsed_cv(out)
     _ensure_keywords_present(out, mk)
 
-    try:
-        cv_text = cv_plaintext_for_ats_scoring(out)
-        ats_result = calculate_ats_score_cached(cv_text, jt)
-        score_after = int(ats_result.get("score", 0))
-        out["_ats_score_achieved"] = score_after
-    except Exception as exc:
-        logger.warning("Operation failed: %s", exc)
-        score_after = 0
-        out["_ats_score_achieved"] = 0
-        ats_result = {"matched_keywords": []}
+    score_after = 0
+    ats_result: dict = {"matched_keywords": []}
+    if not fast_mode:
+        try:
+            cv_text = cv_plaintext_for_ats_scoring(out)
+            ats_result = calculate_ats_score_cached(cv_text, jt)
+            score_after = int(ats_result.get("score", 0))
+            out["_ats_score_achieved"] = score_after
+        except Exception as exc:
+            logger.warning("Operation failed: %s", exc)
+            out["_ats_score_achieved"] = 0
 
     plain_after = cv_plaintext_for_ats_scoring(out)
     matched_from_sent = [k for k in mk if _keyword_in_plaintext(k, plain_after)]

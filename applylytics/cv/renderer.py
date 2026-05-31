@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from utils.cv_generator import cv_context_from_structured, render_cv
+from applylytics.cv.docx_generator import cv_context_from_structured, render_cv
 
 __all__ = ["cv_context_from_structured", "render_cv_to_text", "render_docx_to_bytes"]
 

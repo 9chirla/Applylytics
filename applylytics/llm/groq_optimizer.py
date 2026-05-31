@@ -10,18 +10,23 @@ import re
 from pathlib import Path
 from typing import Any
 
-from openai import APIError, OpenAI, RateLimitError as OpenAIRateLimitError
+from openai import APIConnectionError, APIError, OpenAI, RateLimitError as OpenAIRateLimitError
 
 logger = logging.getLogger("applylytics")
 
 _GROQ_CLIENT: OpenAI | None = None
 _GEMINI_CLIENT: OpenAI | None = None
+_GEMINI_KEY_REJECTED: bool = False
 
 _DEBUG = os.getenv("APPLYLYTICS_DEBUG", "").strip().lower() in ("1", "true", "yes", "yes")
 
 
-def get_groq_model() -> str:
-    """Model id for Groq chat completions; override with env GROQ_MODEL."""
+def get_groq_model(*, fast: bool = False) -> str:
+    """Model id for Groq chat completions; override with env GROQ_MODEL / GROQ_FAST_MODEL."""
+    if fast:
+        fast_m = (os.getenv("GROQ_FAST_MODEL") or "llama-3.1-8b-instant").strip()
+        if fast_m:
+            return fast_m
     try:
         from applylytics.config import settings
 
@@ -30,8 +35,8 @@ def get_groq_model() -> str:
             return m
     except ImportError:
         pass
-    m = (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip()
-    return m or "llama-3.3-70b-versatile"
+    m = (os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
+    return m or "llama-3.1-8b-instant"
 
 
 def _resolve_groq_api_key() -> str:
@@ -61,19 +66,42 @@ def get_groq_client() -> OpenAI:
         from applylytics.config import api_key_help_message
 
         raise RuntimeError(f"GROQ_API_KEY is not set. {api_key_help_message()}")
-    _GROQ_CLIENT = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+    # max_retries=0: on 429, fail fast and use Gemini fallback instead of SDK backoff (22s+).
+    _GROQ_CLIENT = OpenAI(
+        api_key=api_key,
+        base_url="https://api.groq.com/openai/v1",
+        max_retries=0,
+        timeout=120.0,
+    )
     return _GROQ_CLIENT
 
 
-def reset_gemini_client() -> None:
+def reset_gemini_client(*, clear_rejected: bool = True) -> None:
     """Drop cached Gemini client (e.g. after rotating keys or loading Streamlit secrets)."""
-    global _GEMINI_CLIENT
+    global _GEMINI_CLIENT, _GEMINI_KEY_REJECTED
     _GEMINI_CLIENT = None
+    if clear_rejected:
+        _GEMINI_KEY_REJECTED = False
+
+
+def _mark_gemini_key_invalid(reason: str) -> None:
+    """Remember invalid Gemini key so we do not retry four models on every Groq 429."""
+    global _GEMINI_CLIENT, _GEMINI_KEY_REJECTED
+    _GEMINI_KEY_REJECTED = True
+    _GEMINI_CLIENT = None
+    logger.warning("Gemini disabled for this process: %s", reason)
+
+
+def _gemini_error_is_invalid_key(err: str | BaseException) -> bool:
+    text = str(err)
+    return "API key not valid" in text or "API_KEY_INVALID" in text
 
 
 def get_gemini_client() -> OpenAI | None:
     """OpenAI-compatible client for Google Gemini, or None if GEMINI_API_KEY is unset."""
     global _GEMINI_CLIENT
+    if _GEMINI_KEY_REJECTED:
+        return None
     try:
         from applylytics.config import resolve_gemini_api_key
 
@@ -196,8 +224,12 @@ def _gemini_fallback_chat(
     kwargs: dict[str, Any],
 ) -> tuple[Any, str | None]:
     """Try Gemini models in order via direct chat.completions (no Groq wrapper)."""
-    from applylytics.llm.client import RateLimitError as LLMRateLimitError
-    from applylytics.llm.client import groq_quota_user_message
+    from applylytics.llm.client import (
+        ApplylyticsLLMError,
+        RateLimitError as LLMRateLimitError,
+        groq_quota_user_message,
+        retryable_chat_create,
+    )
 
     fb_kwargs = dict(kwargs)
     models = get_gemini_fallback_models()
@@ -215,7 +247,7 @@ def _gemini_fallback_chat(
         attempt_kwargs = dict(fb_kwargs)
         attempt_kwargs["model"] = model
         try:
-            response = fallback_client.chat.completions.create(**attempt_kwargs)
+            response = retryable_chat_create(fallback_client, **attempt_kwargs)
             logger.info(
                 "LLM chat completion via provider=gemini model=%s",
                 model,
@@ -230,7 +262,7 @@ def _gemini_fallback_chat(
                 plain = dict(attempt_kwargs)
                 plain.pop("response_format", None)
                 try:
-                    response = fallback_client.chat.completions.create(**plain)
+                    response = retryable_chat_create(fallback_client, **plain)
                     logger.info(
                         "LLM chat completion via provider=gemini model=%s (no response_format)",
                         model,
@@ -248,13 +280,16 @@ def _gemini_fallback_chat(
                     continue
             last_err = f"Gemini API error ({getattr(exc, 'status_code', '?')}): {exc}"
             logger.warning("Gemini model %s failed: %s", model, last_err)
+            if _gemini_error_is_invalid_key(last_err):
+                _mark_gemini_key_invalid(last_err)
+                break
         except (OpenAIRateLimitError, LLMRateLimitError) as exc:
             last_rate_exc = exc
             logger.warning("Gemini model %s rate limited, trying next model", model)
             continue
 
     if last_rate_exc is not None:
-        raise LLMRateLimitError(groq_quota_user_message(last_rate_exc)) from last_rate_exc
+        raise ApplylyticsLLMError(groq_quota_user_message(last_rate_exc), cause=last_rate_exc) from last_rate_exc
     return None, last_err or "All configured Gemini fallback models failed."
 
 
@@ -270,8 +305,12 @@ def safe_groq_chat_create(
 
     Raises applylytics.llm.client.RateLimitError when both providers are rate limited.
     """
-    from applylytics.llm.client import RateLimitError as LLMRateLimitError
-    from applylytics.llm.client import groq_quota_user_message
+    from applylytics.llm.client import (
+        ApplylyticsLLMError,
+        RateLimitError as LLMRateLimitError,
+        groq_quota_user_message,
+        retryable_chat_create,
+    )
 
     model = kwargs.get("model", "?")
     fb_client = fallback_client or get_gemini_client()
@@ -284,10 +323,43 @@ def safe_groq_chat_create(
         logger.warning("Groq failed (%s); falling back to Gemini", reason)
         return _gemini_fallback_chat(fb_client, fb_model, attempt_kwargs)
 
+    def _try_groq_fast_model_retry() -> tuple[Any | None, str | None]:
+        """On TPM/rate limit, retry once with GROQ_FAST_MODEL (smaller, cheaper)."""
+        primary = str(kwargs.get("model", ""))
+        fast = get_groq_model(fast=True)
+        if not primary or primary == fast:
+            return None, None
+        retry = dict(kwargs)
+        retry["model"] = fast
+        retry["max_tokens"] = min(int(retry.get("max_tokens", 4096)), 2048)
+        if retry.get("messages"):
+            retry["messages"] = _shrink_messages_for_groq(retry["messages"])
+        try:
+            response = retryable_chat_create(client, **retry)
+            logger.info(
+                "Groq rate limit on %s; retry succeeded with fast model %s",
+                primary,
+                fast,
+            )
+            return response, None
+        except OpenAIRateLimitError:
+            return None, None
+        except APIError as exc2:
+            if _http_status_429(exc2):
+                return None, None
+            return None, None
+
     def _rate_limit_fallback(exc: BaseException) -> tuple[Any, str | None]:
+        fast_response, _ = _try_groq_fast_model_retry()
+        if fast_response is not None:
+            return fast_response, None
         if not can_fallback:
-            raise LLMRateLimitError(groq_quota_user_message(exc)) from exc
-        return _gemini_fallback_chat(fb_client, fb_model, kwargs)
+            raise ApplylyticsLLMError(groq_quota_user_message(exc), cause=exc) from exc
+        response, err = _gemini_fallback_chat(fb_client, fb_model, kwargs)
+        if err and _gemini_error_is_invalid_key(err):
+            _mark_gemini_key_invalid(err)
+            raise ApplylyticsLLMError(groq_quota_user_message(exc), cause=exc) from exc
+        return response, err
 
     def _payload_fallback() -> tuple[Any, str | None]:
         shrunk = dict(kwargs)
@@ -295,7 +367,7 @@ def safe_groq_chat_create(
             shrunk["messages"] = _shrink_messages_for_groq(shrunk["messages"])
         shrunk["max_tokens"] = min(int(shrunk.get("max_tokens", 4096)), 3072)
         try:
-            response = client.chat.completions.create(**shrunk)
+            response = retryable_chat_create(client, **shrunk)
             logger.info("LLM chat completion via provider=groq model=%s (truncated retry)", model)
             return response, None
         except APIError as exc2:
@@ -309,11 +381,13 @@ def safe_groq_chat_create(
             return _rate_limit_fallback(exc2)
 
     try:
-        response = client.chat.completions.create(**kwargs)
+        response = retryable_chat_create(client, **kwargs)
         logger.info("LLM chat completion via provider=groq model=%s", model)
         return response, None
-    except OpenAIRateLimitError as exc:
+    except (OpenAIRateLimitError, APIConnectionError) as exc:
         return _rate_limit_fallback(exc)
+    except ApplylyticsLLMError:
+        raise
     except LLMRateLimitError:
         raise
     except APIError as exc:
@@ -501,6 +575,29 @@ def build_strict_system_prompt() -> str:
     return STRICT_SYSTEM_PROMPT
 
 
+FAST_SYSTEM_PROMPT = """You are a UK CV rewriter. Transform the raw CV into recruiter-grade JSON.
+
+RULES (violations cause rejection):
+- First-person implied: no "I/we/my", no candidate name in profile/bullets; UK style; start with verbs.
+- Full rewrite: keep only titles, employers, dates, verified numbers; low overlap with source wording.
+- Profile: exactly 3 full sentences (≥12 words each). S1: qualification + institution + year + "with hands-on experience in …". S2: quantified achievement with number from source. S3: target role + value. No banned filler ("passionate", "results-driven", etc.).
+- Bullets: action + tool/dataset/audience + outcome; ≤20 words; past tense; quantify from source only; min counts per role (primary 4–5, secondary/internship 2). Name tools (Excel, Power BI, SQL, etc.) where relevant.
+- Skills: 8–10 plain items, no category prefixes; evidenced in CV or job description; preserve required keywords verbatim when listed.
+- Projects/certifications: only from source; [] if absent. No invented roles or projects.
+- Banned: "demonstrating", "leveraging", "utilizing", passive "was responsible for", filler endings.
+- Spacing: spaces between all words in names/phrases.
+
+Return ONLY one JSON object (no markdown) with keys:
+name, contact_phone, contact_email, contact_location, linkedin, personal_statement, key_skills, skills,
+work_experience[{job_title, employer, dates, bullets}], projects[], education[], certifications[], interests[], references.
+"""
+
+
+def build_fast_system_prompt() -> str:
+    """Shorter system prompt for background/email runs (fewer input tokens)."""
+    return FAST_SYSTEM_PROMPT
+
+
 def extract_cv_data(raw_text: str) -> dict[str, Any]:
     """Lightweight extraction of hints from raw CV text (no LLM)."""
     text = raw_text or ""
@@ -517,12 +614,15 @@ def build_user_message(
     raw_text: str,
     job_text: str = "",
     missing_keywords: list[str] | None = None,
+    *,
+    fast_mode: bool = False,
 ) -> str:
     """User message with raw CV plus optional job / keyword context (not part of system prompt)."""
-    from applylytics.constants import MAX_CV_OPTIMIZER_CHARS
+    from applylytics.constants import MAX_CV_OPTIMIZER_CHARS, MAX_CV_OPTIMIZER_CHARS_FAST, MAX_JOB_CONTEXT_CHARS_FAST
     from applylytics.llm.context import smart_truncate
 
-    raw_text = smart_truncate((raw_text or "").strip(), MAX_CV_OPTIMIZER_CHARS)
+    cap = MAX_CV_OPTIMIZER_CHARS_FAST if fast_mode else MAX_CV_OPTIMIZER_CHARS
+    raw_text = smart_truncate((raw_text or "").strip(), cap)
     hints = extract_cv_data(raw_text)
     parts = [
         "Below is the candidate's raw CV text. Apply all rewriting rules from your system prompt.",
@@ -537,7 +637,8 @@ def build_user_message(
     ]
     jt = (job_text or "").strip()
     if jt:
-        parts.extend(["", "TARGET JOB DESCRIPTION (tailor honestly; do not invent experience):", jt[:12000]])
+        job_cap = MAX_JOB_CONTEXT_CHARS_FAST if fast_mode else 12_000
+        parts.extend(["", "TARGET JOB DESCRIPTION (tailor honestly; do not invent experience):", jt[:job_cap]])
     mk = [str(k).strip() for k in (missing_keywords or []) if k and str(k).strip()][:40]
     if mk:
         bullets = "\n".join(f'  • "{kw}"' for kw in mk)
@@ -639,14 +740,18 @@ def _fetch_chat_completion(
     messages: list[dict[str, str]],
     temperature: float,
     json_mode: bool,
+    max_tokens: int = 4096,
+    allow_plain_retry: bool = True,
+    _fast_mode: bool = False,
 ) -> tuple[Any, str | None]:
     """Groq chat with optional Gemini fallback; returns (response, error_message)."""
     from applylytics.llm.client import RateLimitError as LLMRateLimitError
 
     fallback_client = get_gemini_client()
     fallback_model = get_gemini_model()
-    logger.warning(
-        "Gemini client available: %s (fallback models: %s)",
+    fast_mode = _fast_mode
+    logger.debug(
+        "Gemini fallback available: %s (models: %s)",
         fallback_client is not None,
         ", ".join(get_gemini_fallback_models()) if fallback_client else "n/a",
     )
@@ -654,7 +759,7 @@ def _fetch_chat_completion(
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     }
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
@@ -675,6 +780,17 @@ def _fetch_chat_completion(
 
                 raise LLMRateLimitError(groq_quota_user_message(exc)) from exc
             raise
+
+    # Background email: prefer Gemini when configured to spare Groq quota.
+    if fast_mode and fallback_client is not None and fallback_model:
+        gemini_resp, gemini_err = _gemini_fallback_chat(
+            fallback_client, fallback_model, kwargs
+        )
+        if gemini_resp is not None:
+            logger.info("CV optimiser fast_mode: used Gemini (%s)", fallback_model)
+            return gemini_resp, None
+        if gemini_err:
+            logger.warning("CV optimiser fast_mode: Gemini failed (%s); trying Groq once", gemini_err[:120])
 
     try:
         response, err = _call(kwargs)
@@ -699,7 +815,7 @@ def _fetch_chat_completion(
                     return gemini_resp, None
                 if gemini_err:
                     return None, gemini_err
-        if json_mode:
+        if json_mode and allow_plain_retry:
             plain_kwargs = {k: v for k, v in kwargs.items() if k != "response_format"}
             response, err = _call(plain_kwargs)
             if err is None:
@@ -721,6 +837,8 @@ def call_groq_with_retry(
     *,
     max_retries: int = 3,
     initial_temperature: float = 0.7,
+    fast_mode: bool = False,
+    max_output_tokens: int | None = None,
 ) -> dict[str, Any]:
     """
     Calls Groq. Retries on JSON failure or excessive similarity to the raw CV
@@ -730,12 +848,17 @@ def call_groq_with_retry(
     temperature = initial_temperature
     last_parsed: dict[str, Any] | None = None
     last_similarity: float | None = None
+    if fast_mode:
+        max_retries = min(max_retries, 1)
+    out_tokens = max_output_tokens if max_output_tokens is not None else (2048 if fast_mode else 4096)
 
-    model = get_groq_model()
+    model = get_groq_model(fast=fast_mode)
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": ""},
     ]
+    if fast_mode:
+        logger.info("CV optimiser fast_mode: model=%s max_retries=%s max_tokens=%s", model, max_retries, out_tokens)
 
     for attempt in range(max_retries):
         user_message = user_message_base + "".join(warnings)
@@ -747,6 +870,9 @@ def call_groq_with_retry(
                 messages=messages,
                 temperature=temperature,
                 json_mode=True,
+                max_tokens=out_tokens,
+                allow_plain_retry=not fast_mode,
+                _fast_mode=fast_mode,
             )
         except Exception as exc:
             from applylytics.llm.client import RateLimitError as LLMRateLimitError
@@ -798,6 +924,9 @@ def call_groq_with_retry(
             continue
 
         last_parsed = processed
+        if fast_mode:
+            return processed
+
         output_text = _flatten_profile_and_bullets(processed)
         similarity = _compute_similarity(raw_text, output_text)
         last_similarity = similarity
@@ -1051,6 +1180,7 @@ def run_generic_cv_optimisation_pipeline(
     job_text: str = "",
     missing_keywords: list[str] | None = None,
     keyword_requirements_block: str = "",
+    fast_mode: bool = False,
 ) -> dict[str, Any]:
     """
     Full rewrite: strict system prompt → Groq with similarity retry → post-process → validate.
@@ -1077,8 +1207,13 @@ def run_generic_cv_optimisation_pipeline(
     except RuntimeError as e:
         return {"error": str(e)}
 
-    system_prompt = build_strict_system_prompt()
-    user_message = build_user_message(rt, job_text=job_text, missing_keywords=missing_keywords)
+    system_prompt = build_fast_system_prompt() if fast_mode else build_strict_system_prompt()
+    user_message = build_user_message(
+        rt,
+        job_text=job_text,
+        missing_keywords=missing_keywords,
+        fast_mode=fast_mode,
+    )
     if keyword_requirements_block:
         user_message = user_message + keyword_requirements_block
 
@@ -1087,8 +1222,9 @@ def run_generic_cv_optimisation_pipeline(
         system_prompt,
         user_message,
         rt,
-        max_retries=3,
+        max_retries=1 if fast_mode else 3,
         initial_temperature=0.2,
+        fast_mode=fast_mode,
     )
     if groq_out.get("error"):
         return groq_out

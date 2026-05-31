@@ -6,7 +6,11 @@ import logging
 
 from applylytics.config import settings
 from applylytics.llm.client import get_groq_client, require_groq_api_key
-from utils.cv_optimizer import get_gemini_client, get_gemini_model, safe_groq_chat_create
+from applylytics.llm.groq_optimizer import (
+    get_gemini_client,
+    get_gemini_model,
+    safe_groq_chat_create,
+)
 from applylytics.llm.context import prepare_resume_job_texts
 from applylytics.llm import prompts
 

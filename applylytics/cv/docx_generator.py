@@ -224,16 +224,27 @@ def cv_context_from_structured(
     for edu in data.get("education") or []:
         if not isinstance(edu, dict):
             continue
-        g = edu.get("grade")
-        gpart = f" | {g}" if g else ""
-        e_lines.append(
-            f"{str(edu.get('degree', '')).strip()} | {str(edu.get('institution', '')).strip()} | {str(edu.get('dates', '')).strip()}{gpart}"
-        )
-    certs = [
-        str(c).lstrip("-• ").strip()
-        for c in (data.get("certifications") or [])
-        if str(c).lstrip("-• ").strip()
-    ]
+        parts = [
+            str(edu.get("degree", "")).strip(),
+            str(edu.get("institution", "")).strip(),
+            str(edu.get("dates", "")).strip(),
+        ]
+        parts = [p for p in parts if p]
+        grade = str(edu.get("grade", "")).strip()
+        if grade:
+            parts.append(grade)
+        if parts:
+            e_lines.append(" | ".join(parts))
+    certs: list[str] = []
+    for c in data.get("certifications") or []:
+        if isinstance(c, dict):
+            from applylytics.cv.schema import _normalize_certification
+
+            line = _normalize_certification(c)
+        else:
+            line = str(c).lstrip("-• ").strip()
+        if line:
+            certs.append(line)
     cert_blk = "\n".join(f"- {c}" for c in certs)
     projects = _projects_for_template(data)
     visibility = compute_section_visibility(data, source_resume_text)
